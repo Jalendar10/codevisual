@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#007acc;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0055aa;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4fc3f7;stop-opacity:0.8" />
+      <stop offset="100%" style="stop-color:#007acc;stop-opacity:0.3" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect x="4" y="4" width="120" height="120" rx="24" fill="url(#bg)" />
+
+  <!-- Graph nodes -->
+  <!-- Top node -->
+  <circle cx="64" cy="30" r="10" fill="#ffffff" opacity="0.95" />
+  <circle cx="64" cy="30" r="6" fill="#4fc3f7" />
+
+  <!-- Left node -->
+  <circle cx="32" cy="64" r="10" fill="#ffffff" opacity="0.95" />
+  <circle cx="32" cy="64" r="6" fill="#66bb6a" />
+
+  <!-- Right node -->
+  <circle cx="96" cy="64" r="10" fill="#ffffff" opacity="0.95" />
+  <circle cx="96" cy="64" r="6" fill="#ab47bc" />
+
+  <!-- Bottom-left node -->
+  <circle cx="44" cy="98" r="10" fill="#ffffff" opacity="0.95" />
+  <circle cx="44" cy="98" r="6" fill="#ffa726" />
+
+  <!-- Bottom-right node -->
+  <circle cx="84" cy="98" r="10" fill="#ffffff" opacity="0.95" />
+  <circle cx="84" cy="98" r="6" fill="#26a69a" />
+
+  <!-- Edges -->
+  <line x1="64" y1="40" x2="32" y2="54" stroke="#ffffff" stroke-width="2" opacity="0.6" />
+  <line x1="64" y1="40" x2="96" y2="54" stroke="#ffffff" stroke-width="2" opacity="0.6" />
+  <line x1="32" y1="74" x2="44" y2="88" stroke="#ffffff" stroke-width="2" opacity="0.6" />
+  <line x1="96" y1="74" x2="84" y2="88" stroke="#ffffff" stroke-width="2" opacity="0.6" />
+  <line x1="32" y1="74" x2="84" y2="88" stroke="#ffffff" stroke-width="1.5" opacity="0.3" stroke-dasharray="4,3" />
+  <line x1="96" y1="74" x2="44" y2="88" stroke="#ffffff" stroke-width="1.5" opacity="0.3" stroke-dasharray="4,3" />
+
+  <!-- Code brackets -->
+  <text x="58" y="68" fill="#ffffff" font-family="monospace" font-size="18" font-weight="bold" opacity="0.9">&lt;/&gt;</text>
+</svg>

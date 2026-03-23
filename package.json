@@ -1,0 +1,175 @@
+{
+  "name": "codeflow-visualizer",
+  "displayName": "CodeFlow Visualizer",
+  "description": "Interactive node-based visualization of code structure inside VS Code.",
+  "version": "1.0.0",
+  "publisher": "codeflow",
+  "engines": {
+    "vscode": "^1.110.0"
+  },
+  "categories": [
+    "Visualization",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "code graph",
+    "react flow",
+    "code visualization",
+    "dependency graph",
+    "folder structure"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onCommand:codeflow.visualizeFolder",
+    "onCommand:codeflow.visualizeFile",
+    "onCommand:codeflow.visualizeSelection"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeflow.visualizeFolder",
+        "title": "CodeFlow: Visualize Folder Structure"
+      },
+      {
+        "command": "codeflow.visualizeFile",
+        "title": "CodeFlow: Visualize File"
+      },
+      {
+        "command": "codeflow.visualizeSelection",
+        "title": "CodeFlow: Visualize Selection"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "codeflow.visualizeFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@1"
+        },
+        {
+          "command": "codeflow.visualizeFile",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "codeflow.visualizeFile",
+          "group": "navigation@1"
+        },
+        {
+          "command": "codeflow.visualizeSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodeFlow Visualizer",
+      "properties": {
+        "codeflow.defaultLayout": {
+          "type": "string",
+          "default": "hierarchical",
+          "enum": [
+            "hierarchical",
+            "force-directed",
+            "radial",
+            "tree"
+          ],
+          "description": "Default layout used when a graph opens."
+        },
+        "codeflow.theme": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "light",
+            "dark"
+          ],
+          "description": "Visualization theme. Auto follows the VS Code theme."
+        },
+        "codeflow.showImports": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show import and dependency edges."
+        },
+        "codeflow.showCallGraph": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show heuristic function and method call relationships."
+        },
+        "codeflow.maxDepth": {
+          "type": "number",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Maximum folder depth to scan when visualizing a folder."
+        },
+        "codeflow.excludePatterns": {
+          "type": "array",
+          "default": [
+            "node_modules",
+            ".git",
+            "__pycache__",
+            "dist",
+            "build"
+          ],
+          "description": "Folders or glob patterns excluded from folder visualization."
+        },
+        "codeflow.git.provider": {
+          "type": "string",
+          "default": "github",
+          "enum": [
+            "github",
+            "gitlab"
+          ],
+          "description": "Git provider used by the settings panel and webhook fields."
+        },
+        "codeflow.git.webhookUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Webhook relay URL for GitHub or GitLab merge events."
+        },
+        "codeflow.git.webhookSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Shared secret used by your GitHub or GitLab webhook relay."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "webpack --mode production",
+    "watch": "webpack --mode development --watch",
+    "compile": "webpack --mode development",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.9.0",
+    "dagre": "^0.8.5",
+    "glob": "^10.3.10",
+    "html-to-image": "^1.11.11",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/dagre": "^0.7.52",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "@types/vscode": "^1.110.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "css-loader": "^6.9.1",
+    "eslint": "^8.56.0",
+    "style-loader": "^3.3.4",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "license": "MIT"
+}
