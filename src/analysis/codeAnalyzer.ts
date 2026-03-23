@@ -914,24 +914,25 @@ export class CodeAnalyzer {
     const fullClassSummaries = this.collectClassSummaries(parsed.symbols);
     const classSummaries = fullClassSummaries.length > 0 ? fullClassSummaries : (quickParsed._quickClassSummaries ?? []);
     const estimatedWidth = Math.min(
-      620,
+      720,
       Math.max(
-        380,
-        300 +
+        460,
+        340 +
           Math.max(
-            parsed.name.length * 5,
-            ...classSummaries.map((summary) => summary.name.length * 6),
-            ...topLevelMembers.map((member) => this.simpleName(member.name).length * 5),
+            parsed.name.length * 6,
+            ...classSummaries.map((summary) => summary.name.length * 8),
+            ...classSummaries.flatMap((s) => s.methods.map((m) => m.length * 7)),
+            ...topLevelMembers.map((member) => this.simpleName(member.name).length * 6),
             0
           )
       )
     );
-    // Each class block: header (~36px) + up to 6 methods (~20px each) + padding (~24px) = ~180px
+    // Each class block: header(44px) + label section(12px) + methods(22px each, up to 8) + divider(12px)
     const classBlockHeight = classSummaries.reduce((acc, cls) => {
-      return acc + 36 + Math.min(cls.methods.length, 6) * 20 + 24;
+      return acc + 44 + 12 + Math.min(cls.methods.length, 8) * 22 + 12;
     }, 0);
     const estimatedHeight =
-      180 +
+      210 +                                               // header + metrics grid
       classBlockHeight +
       (topLevelMembers.length > 0 ? 64 : 0) +
       (parsed.dataMappings.length > 0 ? 80 : 0) +
@@ -1077,18 +1078,18 @@ export class CodeAnalyzer {
   ): Record<string, string | number> {
     const baseWidth =
       type === 'folder'
-        ? 260
+        ? 300
         : type === 'file'
-          ? 340
+          ? 420
           : type === 'module' || type === 'external'
-            ? 220
-            : 280;
-    const widthBoost = Math.min(120, Math.round((lineCount || 0) / 5));
-    const sizeBoost = Math.min(60, Math.round((byteSize || 0) / 2000));
+            ? 240
+            : 320;
+    const widthBoost = Math.min(140, Math.round((lineCount || 0) / 5));
+    const sizeBoost = Math.min(80, Math.round((byteSize || 0) / 2000));
 
     return {
       width: baseWidth + widthBoost + sizeBoost,
-      minHeight: type === 'folder' ? 100 : 110,
+      minHeight: type === 'folder' ? 110 : 130,
       opacity: 1,
       zIndex: Math.max(1, 20 - depth),
     };

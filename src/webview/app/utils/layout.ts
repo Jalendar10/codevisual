@@ -46,17 +46,14 @@ function applyDagreLayout<T extends Record<string, unknown>>(
   nodes.forEach((node) => {
     const rawWidth =
       typeof node.style?.width === 'number' ? node.style.width : DEFAULT_SIZE.width;
-    // Add generous padding so dagre reserves enough space for the rendered node
-    const width = rawWidth + 40;
-    // Use minHeight if set (the estimated render height), else fallback.
-    // Add extra padding because actual rendered height often exceeds the estimate.
+    const width = rawWidth + 60;  // extra padding for rendered node
     const rawHeight =
       typeof node.style?.minHeight === 'number'
         ? node.style.minHeight
         : typeof node.style?.height === 'number'
           ? node.style.height
           : DEFAULT_SIZE.height;
-    const height = rawHeight + 60;
+    const height = rawHeight + 80; // extra padding — actual rendered height often exceeds estimate
 
     graph.setNode(node.id, { width, height });
   });

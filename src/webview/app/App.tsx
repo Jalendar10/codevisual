@@ -87,6 +87,10 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // Incremented only when we actually want fitView (graph load / layout change).
+  // Expand/collapse does NOT increment this so zooming is preserved.
+  const fitViewTrigger = useRef(0);
+  const fitViewGeneration = useRef(0);
   const [statusMessage, setStatusMessage] = useState<{ level: StatusTone; message: string } | null>(
     null
   );
@@ -122,6 +126,11 @@ export default function App() {
     vscode.setState({ layout, activeTab });
   }, [activeTab, layout, vscode]);
 
+  // Clear stale AI analysis whenever the user selects a different node
+  useEffect(() => {
+    setAiAnalysis(null);
+  }, [selectedNodeId]);
+
   useEffect(() => {
     const handleMessage = (event: MessageEvent<WebviewMessage>) => {
       const message = event.data;
@@ -135,6 +144,7 @@ export default function App() {
           setRawNodes(message.data.nodes);
           setRawEdges(message.data.edges);
           setSelectedNodeId(null);
+          setAiAnalysis(null);
           setCodePreview(null);
           setContextMenu(null);
           setMappingFocusNodeId(null);
@@ -143,6 +153,8 @@ export default function App() {
           setError(null);
           setIsLoading(false);
           setStatusMessage(null);
+          // Request fitView for the new graph
+          fitViewTrigger.current += 1;
           break;
         case 'aiAnalysis':
           setAiAnalysis({ targetLabel: message.targetLabel, analysis: message.analysis });
@@ -239,9 +251,14 @@ export default function App() {
     setNodes(rendered.nodes);
     setEdges(rendered.edges);
 
-    requestAnimationFrame(() => {
-      instance?.fitView({ padding: 0.14, duration: 350 });
-    });
+    // Only fitView when a graph-load or layout-change explicitly requested it.
+    // Expand/collapse and search do NOT call fitView so the user's zoom is preserved.
+    if (fitViewTrigger.current !== fitViewGeneration.current) {
+      fitViewGeneration.current = fitViewTrigger.current;
+      requestAnimationFrame(() => {
+        instance?.fitView({ padding: 0.12, duration: 350 });
+      });
+    }
   }, [
     rawNodes,
     rawEdges,
@@ -607,7 +624,10 @@ export default function App() {
               <span className="toolbar__title">CodeFlow</span>
               <select
                 value={layout}
-                onChange={(event) => setLayout(event.target.value as GraphLayoutAlgorithm)}
+                onChange={(event) => {
+                  setLayout(event.target.value as GraphLayoutAlgorithm);
+                  fitViewTrigger.current += 1;
+                }}
               >
                 <option value="hierarchical">Hierarchical</option>
                 <option value="force-directed">Force Directed</option>
