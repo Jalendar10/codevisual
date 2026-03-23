@@ -20,17 +20,17 @@
     "folder structure"
   ],
   "icon": "media/icon.png",
-  "activationEvents": [
-    "onCommand:codeflow.visualizeFolder",
-    "onCommand:codeflow.visualizeFile",
-    "onCommand:codeflow.visualizeSelection"
-  ],
+  "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "codeflow.visualizeFolder",
         "title": "CodeFlow: Visualize Folder Structure"
+      },
+      {
+        "command": "codeflow.visualizeFolderByPath",
+        "title": "CodeFlow: Visualize Folder by Path…"
       },
       {
         "command": "codeflow.visualizeFile",

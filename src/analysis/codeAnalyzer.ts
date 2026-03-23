@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { glob } from 'glob';
@@ -48,15 +49,143 @@ export class CodeAnalyzer {
     ]);
     const maxDepth = config.get<number>('maxDepth', 12);
 
-    const files = await this.findFiles(targetPath, excludePatterns, maxDepth);
-    for (const filePath of files) {
-      const parsed = await this.parseFile(filePath, targetPath);
-      if (parsed) {
-        this.parsedFiles.set(filePath, parsed);
-      }
+    const allFiles = await this.findFiles(targetPath, excludePatterns, maxDepth);
+    // Keep folder analysis fast: cap at 150 files
+    const MAX_FILES = 150;
+    const files = allFiles.slice(0, MAX_FILES);
+
+    // Parse files in parallel batches of 20, yielding between batches
+    const BATCH_SIZE = 20;
+    for (let i = 0; i < files.length; i += BATCH_SIZE) {
+      const batch = files.slice(i, i + BATCH_SIZE);
+      await Promise.all(
+        batch.map(async (filePath) => {
+          const parsed = await this.parseFileFast(filePath, targetPath);
+          if (parsed) {
+            this.parsedFiles.set(filePath, parsed);
+          }
+        })
+      );
+      // Yield event loop so VS Code stays responsive
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
 
     return this.buildFolderGraph(targetPath, Array.from(this.parsedFiles.values()));
+  }
+
+  /**
+   * Fast parser used for folder-mode scanning.
+   * Reads the minimum needed: file stats, language, line count, import list,
+   * and a quick regex count of classes/methods.
+   * Does NOT run full symbol parsing, data-mapping extraction, or package detection.
+   */
+  private async parseFileFast(filePath: string, relativeRoot: string): Promise<ParsedFile | null> {
+    try {
+      const stat = await fsPromises.stat(filePath);
+      // Skip files > 200 KB — they're usually generated or minified
+      if (stat.size > 200 * 1024) {
+        return null;
+      }
+
+      const language = ParserFactory.detectLanguage(filePath);
+      if (language === 'unknown') {
+        return null;
+      }
+
+      const buffer = await fsPromises.readFile(filePath);
+      if (!this.isLikelyTextBuffer(buffer, filePath)) {
+        return null;
+      }
+      const content = buffer.toString('utf8');
+      const parser = ParserFactory.getParser(filePath);
+      const imports = parser ? parser.parseImports(content) : [];
+
+      // Quick class/method extraction via lightweight regex (no AST walking)
+      const quickClassSummaries = this.extractQuickClassSummaries(content, language);
+      const classCount = quickClassSummaries.length || (content.match(/\bclass\s+\w/g) || []).length;
+      const methodCount = quickClassSummaries.reduce((s, c) => s + c.methods.length, 0)
+        || (content.match(/\b(?:def |function |async function )\w/g) || []).length;
+
+      return {
+        path: filePath,
+        relativePath: path.relative(relativeRoot, filePath),
+        name: path.basename(filePath),
+        language,
+        lineCount: content.split('\n').length,
+        size: stat.size,
+        symbols: [],            // skip full symbol parsing in folder mode
+        imports,
+        exports: [],
+        packages: [],
+        packageReferences: [],
+        dataMappings: [],       // skip expensive regex in folder mode
+        testFile: parser ? parser.isTestFile(filePath, content) : false,
+        lastModified: stat.mtimeMs,
+        // Store quick class/method data for node display
+        _quickClassCount: classCount,
+        _quickMethodCount: methodCount,
+        _quickClassSummaries: quickClassSummaries,
+      } as ParsedFile & { _quickClassCount: number; _quickMethodCount: number; _quickClassSummaries: GraphClassSummary[] };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Lightweight regex-based class+method extractor for folder-fast mode.
+   * Returns approximate class summaries without any AST walking.
+   */
+  private extractQuickClassSummaries(content: string, language: string): GraphClassSummary[] {
+    const lines = content.split('\n');
+
+    // Class detection regex per language family
+    const classRex =
+      language === 'python'
+        ? /^\s*class\s+(\w+)/
+        : /^\s*(?:export\s+)?(?:abstract\s+|default\s+)?class\s+(\w+)/;
+
+    // Method detection regex per language family
+    const methodRex =
+      language === 'python'
+        ? /^(\s{4,})def\s+(\w+)\s*\(/
+        : /^\s{2,}(?:(?:public|private|protected|static|async|override|abstract|readonly)\s+)*(\w+)\s*\(/;
+
+    const SKIP_KEYWORDS = new Set([
+      'if', 'for', 'while', 'switch', 'catch', 'class', 'return',
+      'new', 'throw', 'typeof', 'instanceof', 'in', 'of',
+    ]);
+
+    const classes: { name: string; line: number }[] = [];
+    const methods: { name: string; line: number }[] = [];
+
+    lines.forEach((line, idx) => {
+      const cm = classRex.exec(line);
+      if (cm) {
+        classes.push({ name: cm[1], line: idx });
+        return;
+      }
+
+      const mm = methodRex.exec(line);
+      if (mm) {
+        const name = language === 'python' ? mm[2] : mm[1];
+        if (name && !SKIP_KEYWORDS.has(name)) {
+          methods.push({ name, line: idx });
+        }
+      }
+    });
+
+    if (classes.length === 0) {
+      return [];
+    }
+
+    return classes.map((cls, i): GraphClassSummary => {
+      const nextClassLine = classes[i + 1]?.line ?? lines.length;
+      const classMethods = methods
+        .filter((m) => m.line > cls.line && m.line < nextClassLine)
+        .map((m) => m.name)
+        .slice(0, 10);
+      return { name: cls.name, kind: 'class', methods: classMethods, lineCount: undefined, tests: [] };
+    });
   }
 
   async analyzeFile(filePath: string): Promise<GraphData> {
@@ -189,8 +318,8 @@ export class CodeAnalyzer {
   private async parseFile(filePath: string, relativeRoot: string): Promise<ParsedFile | null> {
     const parser = ParserFactory.getParser(filePath);
     try {
-      const stat = fs.statSync(filePath);
-      const buffer = stat.isFile() ? fs.readFileSync(filePath) : Buffer.alloc(0);
+      const stat = await fsPromises.stat(filePath);
+      const buffer = stat.isFile() ? await fsPromises.readFile(filePath) : Buffer.alloc(0);
       const content = this.isLikelyTextBuffer(buffer, filePath) ? buffer.toString('utf8') : '';
       const language = ParserFactory.detectLanguage(filePath);
       const imports = parser ? parser.parseImports(content) : [];
@@ -321,6 +450,10 @@ export class CodeAnalyzer {
 
     const showImports = vscode.workspace.getConfiguration('codeflow').get<boolean>('showImports', true);
     if (showImports) {
+      // All external packages are grouped under a single collapsed "Packages" container
+      // to avoid cluttering the canvas with dozens of scattered package nodes.
+      const PKG_CONTAINER_ID = 'pkg-container:__all__';
+
       for (const parsed of files) {
         for (const imp of parsed.imports) {
           const target = this.resolveImport(imp, parsed.path, fileIndex);
@@ -338,29 +471,52 @@ export class CodeAnalyzer {
             continue;
           }
 
-          const externalId = this.externalImportNodeId(imp.source);
-          if (!nodes.has(externalId)) {
-            nodes.set(
-              externalId,
-              {
-                id: externalId,
-                type: 'external',
-                position: { x: 0, y: 0 },
-                style: this.nodeStyle('external', 1, undefined, 0),
-                data: {
-                  label: imp.source,
-                  kind: 'package',
-                  relativePath: imp.source,
-                  external: true,
-                  expandable: false,
-                  expanded: true,
-                  packageRefs: this.buildPackageReferences(parsed.language, [imp], []),
-                  searchText: `${imp.source} ${imp.specifiers.join(' ')}`,
-                },
-              }
-            );
+          // Ensure the packages container node exists (created lazily on first external import)
+          if (!nodes.has(PKG_CONTAINER_ID)) {
+            nodes.set(PKG_CONTAINER_ID, {
+              id: PKG_CONTAINER_ID,
+              type: 'folder',
+              position: { x: 0, y: 0 },
+              style: this.nodeStyle('folder', 1, undefined, 0),
+              data: {
+                label: 'Packages',
+                kind: 'folder',
+                filePath: '',
+                relativePath: 'external packages',
+                parentId: undefined,
+                depth: 1,
+                expandable: true,
+                expanded: false, // collapsed by default — keeps graph clean
+                searchText: 'packages external dependencies',
+              },
+            });
           }
 
+          const externalId = this.externalImportNodeId(imp.source);
+          if (!nodes.has(externalId)) {
+            nodes.set(externalId, {
+              id: externalId,
+              type: 'external',
+              position: { x: 0, y: 0 },
+              style: this.nodeStyle('external', 2, undefined, 0),
+              data: {
+                label: imp.source,
+                kind: 'package',
+                relativePath: imp.source,
+                external: true,
+                expandable: false,
+                expanded: true,
+                // Child of the packages container so it hides when the container is collapsed
+                parentId: PKG_CONTAINER_ID,
+                packageRefs: this.buildPackageReferences(parsed.language, [imp], []),
+                searchText: `${imp.source} ${imp.specifiers.join(' ')}`,
+              },
+            });
+            // Contains edge so the container counts and hides its children correctly
+            this.addEdge(edges, this.containsEdge(PKG_CONTAINER_ID, externalId, 'contains'));
+          }
+
+          // Import edge: file → individual package (hidden when container is collapsed)
           this.addEdge(
             edges,
             this.linkEdge(
@@ -378,23 +534,9 @@ export class CodeAnalyzer {
     this.addInheritanceEdges(allSymbols, nodes, edges, symbolIndex, symbolNameIndex);
     this.addTestFlowEdges(allSymbols, nodes, edges, symbolNameIndex);
 
-    const showCallGraph = vscode.workspace
-      .getConfiguration('codeflow')
-      .get<boolean>('showCallGraph', true);
-    if (showCallGraph) {
-      for (const parsed of files) {
-        try {
-          const content = fs.readFileSync(parsed.path, 'utf8');
-          this.addCallEdges(parsed.symbols, content, 1, nodes, edges);
-        } catch {
-          // Ignore unreadable files for call-graph enrichment.
-        }
-      }
-    }
-
-    for (const parsed of files) {
-      this.addDataFlowArtifacts(parsed, this.fileNodeId(parsed.path), nodes, edges);
-    }
+    // Call graph and data-flow artifacts are skipped in folder mode:
+    // parseFileFast intentionally sets symbols:[] and dataMappings:[] to avoid
+    // expensive O(n²) analysis and blocking I/O that caused VS Code to freeze.
 
     this.updateTestFlowCounts(nodes, edges);
     this.updateContainerCounts(nodes, edges);
@@ -738,7 +880,9 @@ export class CodeAnalyzer {
         parentId: args.parentId,
         depth: args.depth,
         expandable: true,
-        expanded: true,
+        // Only the root folder (depth 0) starts expanded — everything else is collapsed
+        // so the initial view shows only 2 levels (root + direct children).
+        expanded: args.depth === 0,
         searchText: args.name,
       },
     };
@@ -754,35 +898,44 @@ export class CodeAnalyzer {
     const topLevelMembers = parsed.symbols.filter((symbol) =>
       ['function', 'method', 'hook', 'component', 'test', 'testSuite'].includes(symbol.kind)
     );
+    // In folder-fast mode symbols[] is empty; use quick regex data stored by parseFileFast.
+    type FastParsed = ParsedFile & { _quickClassCount?: number; _quickMethodCount?: number; _quickClassSummaries?: GraphClassSummary[] };
+    const quickParsed = parsed as FastParsed;
     const methodCount = flattenedMembers.filter((symbol) =>
       symbol.kind === 'method' || symbol.kind === 'function' || symbol.kind === 'hook' || symbol.kind === 'component'
-    ).length;
+    ).length || (quickParsed._quickMethodCount ?? 0);
     const classCount = flattenedMembers.filter((symbol) =>
       symbol.kind === 'class' || symbol.kind === 'interface' || symbol.kind === 'type' || symbol.kind === 'enum'
-    ).length;
+    ).length || (quickParsed._quickClassCount ?? 0);
     const testCount = flattenedMembers.filter((symbol) =>
       symbol.kind === 'test' || symbol.kind === 'testSuite'
     ).length;
-    const classSummaries = this.collectClassSummaries(parsed.symbols);
+    // Use full symbol-based summaries if available, fall back to quick regex summaries for folder mode
+    const fullClassSummaries = this.collectClassSummaries(parsed.symbols);
+    const classSummaries = fullClassSummaries.length > 0 ? fullClassSummaries : (quickParsed._quickClassSummaries ?? []);
     const estimatedWidth = Math.min(
-      560,
+      620,
       Math.max(
-        340,
-        280 +
+        380,
+        300 +
           Math.max(
-            parsed.name.length * 4,
-            ...classSummaries.map((summary) => summary.name.length * 5),
-            ...topLevelMembers.map((member) => this.simpleName(member.name).length * 4),
+            parsed.name.length * 5,
+            ...classSummaries.map((summary) => summary.name.length * 6),
+            ...topLevelMembers.map((member) => this.simpleName(member.name).length * 5),
             0
           )
       )
     );
+    // Each class block: header (~36px) + up to 6 methods (~20px each) + padding (~24px) = ~180px
+    const classBlockHeight = classSummaries.reduce((acc, cls) => {
+      return acc + 36 + Math.min(cls.methods.length, 6) * 20 + 24;
+    }, 0);
     const estimatedHeight =
-      150 +
-      classSummaries.length * 84 +
-      (topLevelMembers.length > 0 ? 54 : 0) +
-      (parsed.dataMappings.length > 0 ? 64 : 0) +
-      (parsed.packageReferences.length > 0 ? 52 : 0);
+      180 +
+      classBlockHeight +
+      (topLevelMembers.length > 0 ? 64 : 0) +
+      (parsed.dataMappings.length > 0 ? 80 : 0) +
+      (parsed.packageReferences.length > 0 ? 60 : 0);
 
     return {
       id: this.fileNodeId(parsed.path),
@@ -831,21 +984,21 @@ export class CodeAnalyzer {
     const nodeType = this.mapSymbolToNodeType(symbol.kind);
     const flattenedChildren = this.flattenSymbols(symbol.children);
     const estimatedWidth = Math.min(
-      480,
+      520,
       Math.max(
-        260,
-        220 +
+        300,
+        240 +
           Math.max(
-            symbol.name.length * 5,
-            ...flattenedChildren.map((child) => this.simpleName(child.name).length * 4),
+            symbol.name.length * 6,
+            ...flattenedChildren.map((child) => this.simpleName(child.name).length * 5),
             0
           )
       )
     );
     const estimatedHeight =
-      110 +
-      (flattenedChildren.length > 0 ? Math.min(140, flattenedChildren.length * 18) : 0) +
-      (symbol.docComment ? 32 : 0);
+      140 +
+      (flattenedChildren.length > 0 ? Math.min(200, flattenedChildren.length * 22) : 0) +
+      (symbol.docComment ? 40 : 0);
     return {
       id: symbol.id,
       type: nodeType,
@@ -924,18 +1077,18 @@ export class CodeAnalyzer {
   ): Record<string, string | number> {
     const baseWidth =
       type === 'folder'
-        ? 180
+        ? 260
         : type === 'file'
-          ? 250
+          ? 340
           : type === 'module' || type === 'external'
-            ? 160
-            : 190;
-    const widthBoost = Math.min(110, Math.round((lineCount || 0) / 6));
-    const sizeBoost = Math.min(50, Math.round((byteSize || 0) / 2400));
+            ? 220
+            : 280;
+    const widthBoost = Math.min(120, Math.round((lineCount || 0) / 5));
+    const sizeBoost = Math.min(60, Math.round((byteSize || 0) / 2000));
 
     return {
       width: baseWidth + widthBoost + sizeBoost,
-      minHeight: type === 'folder' ? 92 : 86,
+      minHeight: type === 'folder' ? 100 : 110,
       opacity: 1,
       zIndex: Math.max(1, 20 - depth),
     };

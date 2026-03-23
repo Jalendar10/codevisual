@@ -60,34 +60,43 @@ function renderMemberPreview(data: GraphNodeData) {
   );
 }
 
-function renderClassSummary(summary: GraphClassSummary) {
+function renderClassSummary(summary: GraphClassSummary, isLast: boolean) {
+  const shown = summary.methods.slice(0, 8);
+  const extra = summary.methods.length - shown.length;
   return (
     <div key={`${summary.kind}-${summary.name}`} className="cf-node__class-block">
+      {/* Class header row */}
       <div className="cf-node__class-header">
-        <strong>{summary.name}</strong>
-        <span>{summary.kind}</span>
-        {summary.lineCount ? <em>{summary.lineCount}L</em> : null}
+        <span className="cf-node__kind-badge">{summary.kind}</span>
+        <strong className="cf-node__class-name">{summary.name}</strong>
+        {summary.lineCount ? <em className="cf-node__class-lines">{summary.lineCount}L</em> : null}
+        {summary.tests?.length ? <span className="cf-node__class-tests-badge">✓{summary.tests.length}</span> : null}
       </div>
-      <div className="cf-node__class-body">
-        {summary.methods.length > 0 ? (
-          summary.methods.slice(0, 6).map((method, idx) => (
-            <div key={`${summary.name}-${method}`} className="cf-node__class-method">
-              {method}
-              {idx < summary.methods.length - 1 && idx < 5 ? (
-                <span className="cf-node__method-flow"> ↓</span>
-              ) : null}
+      {/* Method tree with vertical connector */}
+      {shown.length > 0 ? (
+        <div className="cf-node__method-tree">
+          {shown.map((method, idx) => {
+            const isLastMethod = idx === shown.length - 1 && extra === 0;
+            return (
+              <div key={`${summary.name}-${method}-${idx}`} className="cf-node__method-row">
+                <span className={`cf-node__tree-branch ${isLastMethod ? 'is-last' : ''}`}>
+                  {isLastMethod ? '└─' : '├─'}
+                </span>
+                <span className="cf-node__method-name">{method}()</span>
+              </div>
+            );
+          })}
+          {extra > 0 ? (
+            <div className="cf-node__method-row">
+              <span className="cf-node__tree-branch is-last">└─</span>
+              <span className="cf-node__method-name is-muted">+{extra} more</span>
             </div>
-          ))
-        ) : (
-          <div className="cf-node__class-method is-muted">No methods detected</div>
-        )}
-        {summary.methods.length > 6 ? (
-          <div className="cf-node__class-method is-muted">+{summary.methods.length - 6} more</div>
-        ) : null}
-        {summary.tests?.length ? (
-          <div className="cf-node__class-tests">{summary.tests.length} test(s)</div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="cf-node__method-empty">no methods</div>
+      )}
+      {!isLast && <div className="cf-node__class-divider" />}
     </div>
   );
 }
@@ -100,7 +109,11 @@ function renderClassSections(data: GraphNodeData) {
   return (
     <div className="cf-node__section">
       <div className="cf-node__section-label">Classes &amp; Methods</div>
-      <div className="cf-node__class-stack">{data.classSummaries.map(renderClassSummary)}</div>
+      <div className="cf-node__class-stack">
+        {data.classSummaries.map((summary, idx) =>
+          renderClassSummary(summary, idx === data.classSummaries!.length - 1)
+        )}
+      </div>
     </div>
   );
 }
@@ -112,18 +125,21 @@ function renderDataMappings(dataMappings?: DataFlowMapping[]) {
 
   return (
     <div className="cf-node__section">
-      <div className="cf-node__section-label">Data Mapping</div>
+      <div className="cf-node__section-label">Data Flow</div>
       <div className="cf-node__mapping-list">
-        {dataMappings.slice(0, 4).map((mapping) => (
+        {dataMappings.slice(0, 5).map((mapping, idx) => (
           <div
-            key={`${mapping.source}-${mapping.target}-${mapping.operation}`}
+            key={`${mapping.source}-${mapping.target}-${mapping.operation}-${idx}`}
             className="cf-node__mapping-item"
           >
-            <strong>{mapping.source}</strong>
-            <span>↓ {mapping.operation || '→'}</span>
-            <span>{mapping.target}</span>
+            <span className="cf-node__mapping-source">{mapping.source}</span>
+            <span className="cf-node__mapping-arrow">──{mapping.operation ? ` ${mapping.operation} ` : '──'}▶</span>
+            <span className="cf-node__mapping-target">{mapping.target}</span>
           </div>
         ))}
+        {dataMappings.length > 5 ? (
+          <div className="cf-node__mapping-more">+{dataMappings.length - 5} more flows</div>
+        ) : null}
       </div>
     </div>
   );
@@ -185,15 +201,17 @@ function renderAiDot(summary?: unknown) {
 
 export function FolderNode({ data, selected }: NodeProps) {
   const payload = data as GraphNodeData;
+  const isExpanded = payload.expanded !== false;
   return (
     <div className={`cf-node cf-node-folder ${selected ? 'is-selected' : ''}`}>
       <Handle type="target" position={Position.Left} className="cf-handle" />
       <div className="cf-node__header">
-        <span className="cf-node__glyph">{payload.expanded ? '▾' : '▸'}</span>
+        <span className="cf-node__toggle">{isExpanded ? '▾' : '▸'}</span>
         <div className="cf-node__titles">
           <div className="cf-node__label">{payload.label}</div>
           <div className="cf-node__caption">{nodeMeta(payload)}</div>
         </div>
+        <span className="cf-node__expand-hint">{isExpanded ? 'click to collapse' : 'click to expand'}</span>
       </div>
       <div className="cf-node__footer">
         <span title={payload.relativePath || payload.filePath}>{shortPath(payload.relativePath || payload.filePath)}</span>

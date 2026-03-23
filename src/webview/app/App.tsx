@@ -86,6 +86,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ level: StatusTone; message: string } | null>(
     null
   );
@@ -140,6 +141,8 @@ export default function App() {
           setAffectedNodeIds([]);
           setTestSummary(null);
           setError(null);
+          setIsLoading(false);
+          setStatusMessage(null);
           break;
         case 'aiAnalysis':
           setAiAnalysis({ targetLabel: message.targetLabel, analysis: message.analysis });
@@ -197,9 +200,15 @@ export default function App() {
           break;
         case 'status':
           setStatusMessage({ level: message.level, message: message.message });
+          if (message.level === 'info') {
+            setIsLoading(true);
+          } else {
+            setIsLoading(false);
+          }
           break;
         case 'error':
           setError(message.message);
+          setIsLoading(false);
           setStatusMessage({ level: 'error', message: message.message });
           break;
       }
@@ -517,6 +526,26 @@ export default function App() {
     [analysisTargetNode, rawNodes, selectedNode, vscode]
   );
 
+  const collapseAll = useCallback(() => {
+    setRawNodes((current) =>
+      current.map((node) =>
+        node.data.expandable
+          ? { ...node, data: { ...node.data, expanded: false } }
+          : node
+      )
+    );
+  }, []);
+
+  const expandAll = useCallback(() => {
+    setRawNodes((current) =>
+      current.map((node) =>
+        node.data.expandable
+          ? { ...node, data: { ...node.data, expanded: true } }
+          : node
+      )
+    );
+  }, []);
+
   const toggleFullscreen = useCallback(() => {
     if (!document.fullscreenElement) {
       appShellRef.current?.requestFullscreen().catch(() => {});
@@ -592,6 +621,8 @@ export default function App() {
                 onChange={(event) => setSearchQuery(event.target.value)}
               />
               <button onClick={fitView}>Fit View</button>
+              <button onClick={collapseAll} title="Collapse all folders">Collapse</button>
+              <button onClick={expandAll} title="Expand all folders">Expand</button>
               <button
                 className={visibility.folders ? 'is-active' : ''}
                 onClick={() => toggleVisibility('folders')}
@@ -677,6 +708,9 @@ export default function App() {
                 onPaneClick={onPaneClick}
                 onInit={onInit}
                 fitView
+                fitViewOptions={{ padding: 0.12 }}
+                minZoom={0.04}
+                maxZoom={2}
                 connectionLineType={ConnectionLineType.SmoothStep}
                 defaultEdgeOptions={{ type: 'smoothstep' }}
                 proOptions={{ hideAttribution: true }}
@@ -703,7 +737,7 @@ export default function App() {
 
                     return (
                       <>
-                        {['class', 'method', 'function'].includes(menuNode.type) ? (
+                        {['class', 'method', 'function', 'file'].includes(menuNode.type || '') ? (
                           <button onClick={() => generateTests(contextMenu.nodeId)}>
                             Create Tests
                           </button>
@@ -746,12 +780,22 @@ export default function App() {
             {!graph && (
               <div className="empty-state">
                 <div className="empty-state__card">
-                  <h2>CodeFlow Visualizer</h2>
-                  <p>
-                    Right-click a folder, file, or selection in VS Code and launch one of the
-                    visualization commands to inspect nested structure, dependencies, methods, and
-                    test flow.
-                  </p>
+                  {isLoading ? (
+                    <>
+                      <div className="loading-spinner" />
+                      <h2>Analyzing…</h2>
+                      <p>{statusMessage?.message || 'Scanning files and building data flow graph…'}</p>
+                    </>
+                  ) : (
+                    <>
+                      <h2>CodeFlow Visualizer</h2>
+                      <p>
+                        Right-click a <strong>folder</strong> or <strong>file</strong> in the
+                        Explorer, or use the Command Palette, to visualize code structure, data
+                        flow, imports, and method calls.
+                      </p>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -763,8 +807,8 @@ export default function App() {
               <p>{selectedNode.data.kind || selectedNode.type}</p>
               <div className="detail-sidebar__meta">
                 <div>
-                  <span>File</span>
-                  <strong title={selectedNode.data.relativePath || selectedNode.data.filePath}>
+                  <span>File name</span>
+                  <strong title={selectedNode.data.filePath || selectedNode.data.relativePath}>
                     {selectedNode.data.relativePath
                       ? selectedNode.data.relativePath.split('/').pop()
                       : selectedNode.data.filePath
@@ -773,13 +817,9 @@ export default function App() {
                   </strong>
                 </div>
                 <div>
-                  <span>Path</span>
+                  <span>Full path</span>
                   <strong title={selectedNode.data.relativePath || selectedNode.data.filePath}>
-                    {selectedNode.data.relativePath
-                      ? selectedNode.data.relativePath.split('/').slice(-2).join('/')
-                      : selectedNode.data.filePath
-                        ? selectedNode.data.filePath.split('/').slice(-2).join('/')
-                        : 'n/a'}
+                    {selectedNode.data.relativePath || selectedNode.data.filePath || 'n/a'}
                   </strong>
                 </div>
                 <div>
@@ -810,7 +850,13 @@ export default function App() {
                 <button
                   onClick={requestAiAnalysis}
                   disabled={!aiStatus.available || !selectedNode.data.filePath}
-                  title={!aiStatus.available ? 'GitHub Copilot not available' : ''}
+                  title={
+                    !aiStatus.available
+                      ? aiStatus.message
+                      : !selectedNode.data.filePath
+                        ? 'Select a file or code node'
+                        : 'Analyze with GitHub Copilot'
+                  }
                 >
                   AI Analysis
                 </button>
@@ -819,7 +865,14 @@ export default function App() {
                   disabled={
                     !aiStatus.available ||
                     !selectedNode.data.filePath ||
-                    !['class', 'method', 'function'].includes(selectedNode.type)
+                    !['class', 'method', 'function', 'file'].includes(selectedNode.type || '')
+                  }
+                  title={
+                    !aiStatus.available
+                      ? aiStatus.message
+                      : !['class', 'method', 'function', 'file'].includes(selectedNode.type || '')
+                        ? 'Select a file, class, method, or function node'
+                        : 'Generate test file with GitHub Copilot'
                   }
                 >
                   Create Tests
@@ -874,9 +927,9 @@ export default function App() {
                   <strong>{testSummary.affectedTargets.slice(0, 8).join(', ')}</strong>
                 </div>
               ) : null}
-              {aiAnalysis && aiAnalysis.targetLabel === selectedNode.data.label ? (
+              {aiAnalysis ? (
                 <div className="detail-sidebar__ai">
-                  <div className="detail-sidebar__ai-title">AI Analysis</div>
+                  <div className="detail-sidebar__ai-title">AI Analysis · {aiAnalysis.targetLabel}</div>
                   <p>{aiAnalysis.analysis.summary}</p>
                   <div className="detail-sidebar__ai-scores">
                     <span>Quality: {aiAnalysis.analysis.codeQuality}/100</span>
@@ -1348,13 +1401,21 @@ function buildRenderableGraph(
           stroke: color,
           strokeWidth:
             edge.type === 'contains'
-              ? 1.6
-              : mappingSet.has(edge.source) || mappingSet.has(edge.target)
-                ? 3.4
-                : affectedSet.has(edge.source) || affectedSet.has(edge.target)
-                  ? 3
-                  : 2.2,
-          opacity: highlight ? 0.95 : loweredQuery || mappingSet.size > 0 || affectedSet.size > 0 ? 0.12 : 0.55,
+              ? 1.4
+              : edge.type === 'dataFlow' || edge.type === 'call'
+                ? 2.6
+                : mappingSet.has(edge.source) || mappingSet.has(edge.target)
+                  ? 3.6
+                  : affectedSet.has(edge.source) || affectedSet.has(edge.target)
+                    ? 3.2
+                    : 2.2,
+          opacity: highlight
+            ? 1
+            : loweredQuery || mappingSet.size > 0 || affectedSet.size > 0
+              ? 0.14
+              : edge.type === 'contains'
+                ? 0.36
+                : 0.72,
           strokeDasharray:
             edge.type === 'reference' || edge.type === 'testFlow' || edge.type === 'dataFlow'
               ? '6 4'

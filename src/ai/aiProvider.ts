@@ -223,35 +223,39 @@ export class CopilotProvider implements IAIProvider {
   name = 'GitHub Copilot';
 
   async isAvailable(): Promise<boolean> {
-    // vscode.lm requires VS Code 1.90+
-    if (typeof vscode.lm === 'undefined') return false;
-    // Accept either GitHub.copilot or GitHub.copilot-chat being installed
-    const hasCopilot =
-      !!vscode.extensions.getExtension('GitHub.copilot') ||
-      !!vscode.extensions.getExtension('GitHub.copilot-chat');
-    if (!hasCopilot) return false;
-    // Confirm at least one model is actually accessible
-    try {
-      const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-      return models.length > 0;
-    } catch {
+    // Only check that vscode.lm exists and the Copilot extension is installed.
+    // Do NOT call selectChatModels here — that triggers a VS Code permission
+    // dialog at startup before the user has done anything, which they'll miss,
+    // causing the dialog to auto-dismiss and models to appear unavailable.
+    if (typeof vscode.lm === 'undefined') {
       return false;
     }
+    return !!(
+      vscode.extensions.getExtension('GitHub.copilot') ||
+      vscode.extensions.getExtension('GitHub.copilot-chat')
+    );
   }
 
-  /** Pick the best available Copilot model (prefer gpt-4o family) */
+  /** Pick the best available Copilot model (prefer gpt-4o family). */
   private async selectModel(): Promise<vscode.LanguageModelChat> {
-    const all = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-    if (all.length === 0) {
+    let all: vscode.LanguageModelChat[] = [];
+    try {
+      all = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+    } catch (err) {
       throw new Error(
-        'No Copilot models available. Make sure GitHub Copilot Chat is installed and you are signed in.'
+        `Could not access GitHub Copilot models: ${err instanceof Error ? err.message : String(err)}. ` +
+        'Make sure GitHub Copilot Chat is installed, you are signed in, and have accepted the permission request.'
       );
     }
-    // Prefer a GPT-4 class model if available
-    const preferred = all.find(m =>
-      m.family?.includes('gpt-4') || m.id?.includes('gpt-4')
-    );
-    return preferred ?? all[0];
+    if (all.length === 0) {
+      throw new Error(
+        'No Copilot models are available right now. ' +
+        'Check that GitHub Copilot Chat is installed and signed in, then try again. ' +
+        'If this is the first use, VS Code may have shown a permission prompt — please accept it and retry.'
+      );
+    }
+    // Prefer a GPT-4 class model; fall back to whatever is available
+    return all.find((m) => m.family?.includes('gpt-4') || m.id?.includes('gpt-4')) ?? all[0];
   }
 
   private async sendPrompt(prompt: string): Promise<string> {
@@ -380,13 +384,15 @@ export class AIProviderManager {
   
   async getCopilotStatus(): Promise<{ available: boolean; provider: string; message: string }> {
     const available = await this.copilot.isAvailable();
-    return {
-      available,
-      provider: 'GitHub Copilot',
-      message: available
-        ? 'GitHub Copilot Chat is available and will be used for AI analysis.'
-        : 'GitHub Copilot Chat is not available. Install it and sign in to enable AI analysis.',
-    };
+    let message: string;
+    if (available) {
+      message = 'GitHub Copilot is installed. Click AI Analysis to run — VS Code may ask for permission on first use.';
+    } else if (typeof vscode.lm === 'undefined') {
+      message = 'VS Code 1.90+ is required for AI features via the Language Model API.';
+    } else {
+      message = 'GitHub Copilot Chat is not installed or not signed in. Install it from the Extensions panel to enable AI analysis.';
+    }
+    return { available, provider: 'GitHub Copilot', message };
   }
 
   /** Return the Copilot provider only. */

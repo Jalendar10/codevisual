@@ -2,7 +2,7 @@ import dagre from 'dagre';
 import { Edge, Node } from '@xyflow/react';
 import { GraphLayoutAlgorithm } from '../../../types';
 
-const DEFAULT_SIZE = { width: 340, height: 180 };
+const DEFAULT_SIZE = { width: 380, height: 220 };
 
 export function applyLayout<T extends Record<string, unknown>>(
   nodes: Node<T>[],
@@ -19,10 +19,10 @@ export function applyLayout<T extends Record<string, unknown>>(
     case 'radial':
       return applyRadialLayout(nodes, edges);
     case 'tree':
-      return applyDagreLayout(nodes, edges, 'TB', 140, 180);
+      return applyDagreLayout(nodes, edges, 'LR', 60, 280);
     case 'hierarchical':
     default:
-      return applyDagreLayout(nodes, edges, 'TB', 150, 210);
+      return applyDagreLayout(nodes, edges, 'LR', 60, 320);
   }
 }
 
@@ -39,19 +39,24 @@ function applyDagreLayout<T extends Record<string, unknown>>(
     rankdir: direction,
     nodesep,
     ranksep,
-    marginx: 48,
-    marginy: 48,
+    marginx: 80,
+    marginy: 80,
   });
 
   nodes.forEach((node) => {
-    const width =
+    const rawWidth =
       typeof node.style?.width === 'number' ? node.style.width : DEFAULT_SIZE.width;
-    const height =
+    // Add generous padding so dagre reserves enough space for the rendered node
+    const width = rawWidth + 40;
+    // Use minHeight if set (the estimated render height), else fallback.
+    // Add extra padding because actual rendered height often exceeds the estimate.
+    const rawHeight =
       typeof node.style?.minHeight === 'number'
         ? node.style.minHeight
         : typeof node.style?.height === 'number'
           ? node.style.height
           : DEFAULT_SIZE.height;
+    const height = rawHeight + 60;
 
     graph.setNode(node.id, { width, height });
   });
@@ -60,7 +65,11 @@ function applyDagreLayout<T extends Record<string, unknown>>(
   dagre.layout(graph);
 
   return nodes.map((node) => {
-    const { width, height, x, y } = graph.node(node.id);
+    const dagNode = graph.node(node.id);
+    if (!dagNode) {
+      return node;
+    }
+    const { width, height, x, y } = dagNode;
     return {
       ...node,
       position: {
@@ -130,14 +139,14 @@ function applyForceLayout<T extends Record<string, unknown>>(nodes: Node<T>[], e
   nodes.forEach((node, index) => {
     const angle = (index / Math.max(nodes.length, 1)) * Math.PI * 2;
     state.set(node.id, {
-      x: 540 + Math.cos(angle) * 260,
-      y: 380 + Math.sin(angle) * 260,
+      x: 800 + Math.cos(angle) * 500,
+      y: 600 + Math.sin(angle) * 500,
       vx: 0,
       vy: 0,
     });
   });
 
-  for (let iteration = 0; iteration < 120; iteration += 1) {
+  for (let iteration = 0; iteration < 180; iteration += 1) {
     for (const source of nodes) {
       const sourceState = state.get(source.id)!;
       for (const target of nodes) {
@@ -149,7 +158,7 @@ function applyForceLayout<T extends Record<string, unknown>>(nodes: Node<T>[], e
         const dx = sourceState.x - targetState.x;
         const dy = sourceState.y - targetState.y;
         const distance = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-        const repulsion = 5200 / (distance * distance);
+        const repulsion = 18000 / (distance * distance);
         sourceState.vx += (dx / distance) * repulsion;
         sourceState.vy += (dy / distance) * repulsion;
       }
@@ -164,10 +173,10 @@ function applyForceLayout<T extends Record<string, unknown>>(nodes: Node<T>[], e
 
       const dx = targetState.x - sourceState.x;
       const dy = targetState.y - sourceState.y;
-      sourceState.vx += dx * 0.008;
-      sourceState.vy += dy * 0.008;
-      targetState.vx -= dx * 0.008;
-      targetState.vy -= dy * 0.008;
+      sourceState.vx += dx * 0.006;
+      sourceState.vy += dy * 0.006;
+      targetState.vx -= dx * 0.006;
+      targetState.vy -= dy * 0.006;
     }
 
     state.forEach((entry) => {

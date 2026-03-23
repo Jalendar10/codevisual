@@ -46,11 +46,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
+  gap: 8px;
+  padding: 6px 12px;
   background: color-mix(in srgb, var(--canvas-bg) 76%, #0d1728 24%);
   border-bottom: 1px solid var(--panel-border);
   backdrop-filter: blur(16px);
+  flex-shrink: 0;
 }
 
 .workspace-panel {
@@ -82,8 +83,9 @@ body {
   background: rgba(8, 18, 32, 0.68);
   color: var(--panel-text);
   border-radius: 999px;
-  padding: 8px 12px;
+  padding: 5px 12px;
   font: inherit;
+  font-size: 12px;
 }
 
 .tabbar button {
@@ -99,10 +101,11 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
+  gap: 8px;
+  padding: 6px 12px;
   background: color-mix(in srgb, var(--canvas-bg) 76%, #0d1728 24%);
   border-bottom: 1px solid var(--panel-border);
+  flex-shrink: 0;
 }
 
 .toolbar__group,
@@ -127,8 +130,9 @@ body {
   background: rgba(8, 18, 32, 0.68);
   color: var(--panel-text);
   border-radius: 999px;
-  padding: 8px 12px;
+  padding: 5px 10px;
   font: inherit;
+  font-size: 11px;
 }
 
 .toolbar button {
@@ -156,7 +160,7 @@ body {
 }
 
 .toolbar input {
-  min-width: 220px;
+  min-width: 160px;
 }
 
 .canvas-stage {
@@ -527,11 +531,12 @@ body {
 .cf-node__label {
   font-size: 12px;
   font-weight: 700;
-  line-height: 1.2;
-  word-break: break-all;
-  overflow-wrap: anywhere;
+  line-height: 1.3;
+  word-break: break-word;
+  overflow-wrap: break-word;
   overflow: hidden;
   min-width: 0;
+  max-width: 100%;
 }
 
 .cf-node__caption,
@@ -597,62 +602,144 @@ body {
   gap: 8px;
 }
 
+/* ── class block / method tree ── */
 .cf-node__class-block {
-  padding: 10px 12px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 10px 12px 6px;
+  border-radius: 10px;
+  background: rgba(92, 164, 255, 0.07);
+  border: 1px solid rgba(92, 164, 255, 0.18);
 }
 
 .cf-node__class-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  margin-bottom: 6px;
 }
 
-.cf-node__class-header strong {
+.cf-node__class-name {
   font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-blue);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.cf-node__class-header span,
-.cf-node__class-header em {
-  font-size: 10px;
-  color: rgba(247, 251, 255, 0.72);
-  font-style: normal;
-}
-
-.cf-node__class-body {
-  display: grid;
-  gap: 5px;
-  margin-top: 8px;
-}
-
-.cf-node__class-method {
-  font-size: 11px;
-  color: rgba(247, 251, 255, 0.9);
-}
-
-.cf-node__class-method::before {
-  content: '•';
-  margin-right: 6px;
-  color: rgba(247, 186, 61, 0.86);
-}
-
-.cf-node__class-method.is-muted {
-  color: rgba(247, 251, 255, 0.5);
-}
-
-.cf-node__method-flow {
-  color: rgba(247, 186, 61, 0.7);
+.cf-node__class-lines {
   font-size: 9px;
-  margin-left: 4px;
+  color: rgba(247, 251, 255, 0.46);
+  font-style: normal;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
-.cf-node__class-tests {
-  margin-top: 4px;
+.cf-node__class-tests-badge {
+  font-size: 9px;
+  color: rgba(182, 240, 95, 0.85);
+  flex-shrink: 0;
+}
+
+/* Vertical tree of methods */
+.cf-node__method-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 4px;
+}
+
+.cf-node__method-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  line-height: 1.3;
+}
+
+.cf-node__tree-branch {
+  font-family: 'SFMono-Regular', 'IBM Plex Mono', monospace;
   font-size: 10px;
-  color: rgba(247, 251, 255, 0.7);
+  color: rgba(92, 164, 255, 0.55);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.cf-node__method-name {
+  font-family: 'SFMono-Regular', 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  color: rgba(247, 251, 255, 0.88);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cf-node__method-name.is-muted {
+  color: rgba(247, 251, 255, 0.42);
+}
+
+.cf-node__method-empty {
+  font-size: 9px;
+  color: rgba(247, 251, 255, 0.35);
+  padding-left: 18px;
+  padding-bottom: 4px;
+  font-style: italic;
+}
+
+/* Divider between class blocks */
+.cf-node__class-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 8px -12px 0;
+}
+
+.cf-node__kind-badge {
+  background: rgba(92, 164, 255, 0.2);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent-blue);
+  flex-shrink: 0;
+}
+
+/* Toggle hint on folder nodes */
+.cf-node__toggle {
+  font-size: 14px;
+  color: var(--accent-amber);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.cf-node__expand-hint {
+  font-size: 9px;
+  color: rgba(247, 251, 255, 0.32);
+  margin-left: auto;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cf-node__mapping-source {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--accent-cyan);
+}
+
+.cf-node__mapping-arrow {
+  font-size: 10px;
+  color: rgba(247, 186, 61, 0.8);
+  font-family: monospace;
+}
+
+.cf-node__mapping-target {
+  font-size: 11px;
+  color: rgba(247, 251, 255, 0.85);
+}
+
+.cf-node__mapping-more {
+  font-size: 10px;
+  color: rgba(247, 251, 255, 0.45);
+  padding-top: 2px;
 }
 
 .cf-node__members {
@@ -682,11 +769,14 @@ body {
 }
 
 .cf-node__mapping-item {
-  display: grid;
-  gap: 3px;
-  padding: 8px 10px;
-  border-radius: 14px;
-  background: rgba(246, 211, 101, 0.12);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(77, 215, 209, 0.08);
+  border: 1px solid rgba(77, 215, 209, 0.14);
+  flex-wrap: wrap;
 }
 
 .cf-node__mapping-item strong,
@@ -804,13 +894,29 @@ body {
 
 .empty-state__card h2 {
   margin: 0 0 10px;
-  font-size: 22px;
+  font-size: 20px;
 }
 
 .empty-state__card p {
   margin: 0;
   line-height: 1.6;
   color: var(--panel-muted);
+  font-size: 13px;
+}
+
+/* Loading spinner */
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  margin: 0 auto 16px;
+  border: 3px solid rgba(77, 215, 209, 0.18);
+  border-top-color: var(--accent-cyan);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .context-menu {

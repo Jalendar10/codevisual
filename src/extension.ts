@@ -36,7 +36,32 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      await renderGraph('Analyzing folder structure…', async () => {
+      await renderGraph(`Analyzing ${path.basename(folderPath)}…`, async () => {
+        const analyzer = new CodeAnalyzer(getWorkspaceRoot(folderPath) || folderPath);
+        return analyzer.analyzeFolder(folderPath);
+      });
+    }),
+
+    // New command: type a folder path directly in an input box
+    vscode.commands.registerCommand('codeflow.visualizeFolderByPath', async () => {
+      const workspaceRoot = getWorkspaceRoot();
+      const input = await vscode.window.showInputBox({
+        prompt: 'Enter the folder path to visualize',
+        placeHolder: workspaceRoot || '/path/to/folder',
+        value: workspaceRoot || '',
+        ignoreFocusOut: true,
+      });
+      if (!input?.trim()) {
+        return;
+      }
+
+      const folderPath = input.trim();
+      if (!fs.existsSync(folderPath)) {
+        vscode.window.showErrorMessage(`CodeFlow Visualizer: Folder not found — ${folderPath}`);
+        return;
+      }
+
+      await renderGraph(`Analyzing ${path.basename(folderPath)}…`, async () => {
         const analyzer = new CodeAnalyzer(getWorkspaceRoot(folderPath) || folderPath);
         return analyzer.analyzeFolder(folderPath);
       });
@@ -93,7 +118,7 @@ export function activate(context: vscode.ExtensionContext) {
     const document = await vscode.workspace.openTextDocument(filePath);
     const editor = await vscode.window.showTextDocument(document, {
       viewColumn: vscode.ViewColumn.One,
-      preserveFocus: true,
+      preserveFocus: false, // move focus to the opened file so the user sees it
       preview: false,
     });
     if (line) {
@@ -104,6 +129,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.TextEditorRevealType.InCenter
       );
     }
+    webview?.showStatus('success', `Opened ${path.basename(filePath)}${line ? ` at line ${line}` : ''}.`);
   });
 
   webview.onDidRequestExport(async ({ format, content, fileName }) => {
@@ -135,10 +161,13 @@ export function activate(context: vscode.ExtensionContext) {
     try {
       const node = findNode(nodeId);
       if (!node?.data.filePath) {
-        throw new Error('Select a file, class, method, or test node first.');
+        throw new Error('Select a file, class, or method node in the graph first.');
       }
 
       const filePath = node.data.filePath;
+      if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+        throw new Error(`Cannot read "${path.basename(filePath)}" — select a file node, not a folder.`);
+      }
       const fileContent = fs.readFileSync(filePath, 'utf8');
       const content = extractNodeContent(node, fileContent);
       const root = getWorkspaceRoot(filePath) || path.dirname(filePath);
@@ -180,8 +209,8 @@ export function activate(context: vscode.ExtensionContext) {
         throw new Error('Select a class, method, or function node first.');
       }
 
-      if (node.type !== 'class' && node.type !== 'method' && node.type !== 'function') {
-        throw new Error('Right-click a class, method, or function node to generate tests.');
+      if (!['class', 'method', 'function', 'file'].includes(node.type)) {
+        throw new Error('Select a file, class, method, or function node to generate tests.');
       }
 
       const filePath = node.data.filePath;
@@ -391,6 +420,8 @@ async function renderGraph(
   loader: () => Promise<GraphData>
 ): Promise<void> {
   webview?.show();
+  // Notify the webview immediately so it shows a loading indicator
+  webview?.showStatus('info', title);
   void refreshAiStatus();
 
   try {
