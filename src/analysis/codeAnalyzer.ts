@@ -11,6 +11,7 @@ import {
   GraphData,
   GraphEdge,
   GraphClassSummary,
+  GraphMethodSummary,
   GraphNode,
   GraphNodeType,
   ImportInfo,
@@ -99,9 +100,28 @@ export class CodeAnalyzer {
       const content = buffer.toString('utf8');
       const parser = ParserFactory.getParser(filePath);
       const imports = parser ? parser.parseImports(content) : [];
+      const shouldParseDetailedSymbols = language === 'java' || language === 'python';
+      const parsedSymbols = shouldParseDetailedSymbols && parser
+        ? this.annotateSymbolComplexity(
+            this.normalizeSymbols(parser.parseContent(content, filePath), language, filePath, 0),
+            content,
+            1
+          )
+        : [];
+      const methodFlowMappings = shouldParseDetailedSymbols
+        ? this.collectMethodFlowMappings(parsedSymbols, content, 1)
+        : [];
+      const dataMappings = shouldParseDetailedSymbols
+        ? this.mergeDataMappings(this.extractDataMappings(content, language), methodFlowMappings)
+        : [];
+      const symbols = shouldParseDetailedSymbols
+        ? this.annotateSymbolsWithMappings(parsedSymbols, dataMappings)
+        : [];
 
       // Quick class/method extraction via lightweight regex (no AST walking)
-      const quickClassSummaries = this.extractQuickClassSummaries(content, language);
+      const quickClassSummaries = symbols.length > 0
+        ? this.collectClassSummaries(symbols)
+        : this.extractQuickClassSummaries(content, language);
       const classCount = quickClassSummaries.length || (content.match(/\bclass\s+\w/g) || []).length;
       const methodCount = quickClassSummaries.reduce((s, c) => s + c.methods.length, 0)
         || (content.match(/\b(?:def |function |async function )\w/g) || []).length;
@@ -113,12 +133,15 @@ export class CodeAnalyzer {
         language,
         lineCount: content.split('\n').length,
         size: stat.size,
-        symbols: [],            // skip full symbol parsing in folder mode
+        complexity: shouldParseDetailedSymbols
+          ? this.calculateFileComplexity(symbols, content)
+          : this.calculateTextComplexity(content),
+        symbols,
         imports,
-        exports: [],
+        exports: symbols.flatMap((symbol) => symbol.exports),
         packages: [],
         packageReferences: [],
-        dataMappings: [],       // skip expensive regex in folder mode
+        dataMappings,
         testFile: parser ? parser.isTestFile(filePath, content) : false,
         lastModified: stat.mtimeMs,
         // Store quick class/method data for node display
@@ -138,38 +161,68 @@ export class CodeAnalyzer {
   private extractQuickClassSummaries(content: string, language: string): GraphClassSummary[] {
     const lines = content.split('\n');
 
-    // Class detection regex per language family
+    // Class detection regex per language family — also handles annotated classes
     const classRex =
       language === 'python'
-        ? /^\s*class\s+(\w+)/
-        : /^\s*(?:export\s+)?(?:abstract\s+|default\s+)?class\s+(\w+)/;
+        ? /^\s*class\s+(\w+)(?:\(([^)]*)\))?/
+        : /^\s*(?:export\s+)?(?:abstract\s+|default\s+|final\s+|sealed\s+)?(?:class|interface|enum|record)\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+(.+?))?/;
 
     // Method detection regex per language family
     const methodRex =
       language === 'python'
-        ? /^(\s{4,})def\s+(\w+)\s*\(/
-        : /^\s{2,}(?:(?:public|private|protected|static|async|override|abstract|readonly)\s+)*(\w+)\s*\(/;
+        ? /^(\s{2,})def\s+(\w+)\s*\(/
+        : language === 'java' || language === 'kotlin'
+          ? /^\s{2,}(?:(?:public|private|protected|static|final|abstract|synchronized|async|override|default)\s+)*(?:<[\w\s,?]+>\s+)?(\w+(?:<[^>]*>)?)\s+(\w+)\s*\(/
+          : /^\s{2,}(?:(?:public|private|protected|static|async|override|abstract|readonly)\s+)*(\w+)\s*\(/;
+
+    // Field detection for Java/Kotlin
+    const fieldRex = language === 'java' || language === 'kotlin'
+      ? /^\s{2,}(?:(?:public|private|protected|static|final|volatile|transient)\s+)*(\w+(?:<[^>]*>)?)\s+(\w+)\s*[;=]/
+      : null;
 
     const SKIP_KEYWORDS = new Set([
       'if', 'for', 'while', 'switch', 'catch', 'class', 'return',
-      'new', 'throw', 'typeof', 'instanceof', 'in', 'of',
+      'new', 'throw', 'typeof', 'instanceof', 'in', 'of', 'interface', 'enum',
     ]);
 
-    const classes: { name: string; line: number }[] = [];
+    const classes: { name: string; line: number; extends?: string; implements?: string[] }[] = [];
     const methods: { name: string; line: number }[] = [];
+    const fields: { name: string; type: string; line: number }[] = [];
+    const sqlQueries: string[] = [];
+
+    // Detect SQL queries
+    const sqlRex = /(?:SELECT|INSERT|UPDATE|DELETE)\s+.{1,60}?(?:FROM|INTO|SET)\s+(\w+)/gi;
+    let sqlMatch: RegExpExecArray | null;
+    while ((sqlMatch = sqlRex.exec(content)) !== null) {
+      sqlQueries.push(sqlMatch[0].slice(0, 80));
+    }
 
     lines.forEach((line, idx) => {
       const cm = classRex.exec(line);
       if (cm) {
-        classes.push({ name: cm[1], line: idx });
+        const extendsMatch = language === 'python' ? cm[2]?.split(',')[0]?.trim() : cm[2];
+        const implementsMatch = language === 'python' ? cm[2]?.split(',').slice(1).map(s => s.trim()) : cm[3]?.split(',').map(s => s.trim());
+        classes.push({
+          name: cm[1],
+          line: idx,
+          extends: extendsMatch || undefined,
+          implements: implementsMatch?.filter(Boolean),
+        });
         return;
       }
 
       const mm = methodRex.exec(line);
       if (mm) {
-        const name = language === 'python' ? mm[2] : mm[1];
+        const name = language === 'python' ? mm[2] : (language === 'java' || language === 'kotlin') ? mm[2] : mm[1];
         if (name && !SKIP_KEYWORDS.has(name)) {
           methods.push({ name, line: idx });
+        }
+      }
+
+      if (fieldRex) {
+        const fm = fieldRex.exec(line);
+        if (fm && !SKIP_KEYWORDS.has(fm[2]) && fm[2] !== 'class') {
+          fields.push({ name: fm[2], type: fm[1], line: idx });
         }
       }
     });
@@ -183,8 +236,22 @@ export class CodeAnalyzer {
       const classMethods = methods
         .filter((m) => m.line > cls.line && m.line < nextClassLine)
         .map((m) => m.name)
+        .slice(0, 20);
+      const classFields = fields
+        .filter((f) => f.line > cls.line && f.line < nextClassLine)
+        .map((f) => `${f.type} ${f.name}`)
         .slice(0, 10);
-      return { name: cls.name, kind: 'class', methods: classMethods, lineCount: undefined, tests: [] };
+      return {
+        name: cls.name,
+        kind: 'class',
+        methods: classMethods,
+        fields: classFields.length > 0 ? classFields : undefined,
+        extends: cls.extends,
+        implements: cls.implements?.length ? cls.implements : undefined,
+        sqlQueries: sqlQueries.length > 0 ? sqlQueries.slice(0, 5) : undefined,
+        lineCount: nextClassLine - cls.line,
+        tests: [],
+      };
     });
   }
 
@@ -213,16 +280,24 @@ export class CodeAnalyzer {
     const syntheticPath = context.filePath || `selection.${this.extensionForLanguage(language)}`;
     const lineOffset = Math.max(0, (context.startLine || 1) - 1);
     const contentLines = code.split('\n').length;
-    const parsedSymbols = this.normalizeSymbols(
-      parser.parseContent(code, syntheticPath),
-      language,
-      syntheticPath,
-      lineOffset
+    const parsedSymbols = this.annotateSymbolComplexity(
+      this.normalizeSymbols(
+        parser.parseContent(code, syntheticPath),
+        language,
+        syntheticPath,
+        lineOffset
+      ),
+      code,
+      context.startLine || 1
     );
     const imports = parser.parseImports(code);
     const packages: PackageInfo[] = [];
     const packageReferences = this.buildPackageReferences(language, imports, packages);
-    const dataMappings = this.extractDataMappings(code, language);
+    const dataMappings = this.mergeDataMappings(
+      this.extractDataMappings(code, language),
+      this.collectMethodFlowMappings(parsedSymbols, code, context.startLine || 1)
+    );
+    const symbols = this.annotateSymbolsWithMappings(parsedSymbols, dataMappings);
 
     const parsed: ParsedFile = {
       path: syntheticPath,
@@ -231,9 +306,10 @@ export class CodeAnalyzer {
       language,
       lineCount: contentLines,
       size: Buffer.byteLength(code, 'utf8'),
-      symbols: parsedSymbols,
+      complexity: this.calculateFileComplexity(symbols, code),
+      symbols,
       imports,
-      exports: parsedSymbols.flatMap((symbol) => symbol.exports),
+      exports: symbols.flatMap((symbol) => symbol.exports),
       packages,
       packageReferences,
       dataMappings,
@@ -324,9 +400,18 @@ export class CodeAnalyzer {
       const language = ParserFactory.detectLanguage(filePath);
       const imports = parser ? parser.parseImports(content) : [];
       const packages = this.detectPackages(filePath);
-      const symbols = parser
-        ? this.normalizeSymbols(parser.parseContent(content, filePath), language, filePath, 0)
+      const parsedSymbols = parser
+        ? this.annotateSymbolComplexity(
+            this.normalizeSymbols(parser.parseContent(content, filePath), language, filePath, 0),
+            content,
+            1
+          )
         : [];
+      const dataMappings = this.mergeDataMappings(
+        this.extractDataMappings(content, language),
+        this.collectMethodFlowMappings(parsedSymbols, content, 1)
+      );
+      const symbols = this.annotateSymbolsWithMappings(parsedSymbols, dataMappings);
 
       return {
         path: filePath,
@@ -335,12 +420,13 @@ export class CodeAnalyzer {
         language,
         lineCount: content ? content.split('\n').length : 0,
         size: stat.size,
+        complexity: this.calculateFileComplexity(symbols, content),
         symbols,
         imports,
         exports: symbols.flatMap((symbol) => symbol.exports),
         packages,
         packageReferences: this.buildPackageReferences(language, imports, packages),
-        dataMappings: this.extractDataMappings(content, language),
+        dataMappings,
         testFile: parser ? parser.isTestFile(filePath, content) : false,
         lastModified: stat.mtimeMs,
       };
@@ -374,6 +460,232 @@ export class CodeAnalyzer {
         this.normalizeSymbol(child, language, filePath, lineOffset)
       ),
     };
+  }
+
+  private annotateSymbolComplexity(
+    symbols: CodeSymbol[],
+    content: string,
+    contentStartLine: number
+  ): CodeSymbol[] {
+    const lines = content.split('\n');
+    const annotate = (symbol: CodeSymbol): CodeSymbol => {
+      const children = symbol.children.map(annotate);
+      let complexity: number | undefined;
+
+      if (this.isComplexityCarrier(symbol.kind)) {
+        const body = this.extractSymbolBody(lines, symbol, contentStartLine);
+        complexity = this.calculateTextComplexity(body);
+      } else if (children.length > 0) {
+        const childComplexity = children.reduce(
+          (sum, child) => sum + (child.complexity || 0),
+          0
+        );
+        if (childComplexity > 0) {
+          complexity = childComplexity;
+        }
+      }
+
+      return {
+        ...symbol,
+        children,
+        complexity,
+      };
+    };
+
+    return symbols.map(annotate);
+  }
+
+  private isComplexityCarrier(kind: CodeSymbol['kind']): boolean {
+    return ['function', 'method', 'hook', 'component', 'route', 'test', 'testSuite'].includes(kind);
+  }
+
+  private calculateFileComplexity(symbols: CodeSymbol[], content: string): number {
+    const symbolComplexity = this.flattenSymbols(symbols)
+      .filter((symbol) => this.isComplexityCarrier(symbol.kind))
+      .reduce((sum, symbol) => sum + (symbol.complexity || 0), 0);
+
+    return symbolComplexity > 0 ? symbolComplexity : this.calculateTextComplexity(content);
+  }
+
+  private calculateTextComplexity(content: string): number {
+    if (!content.trim()) {
+      return 0;
+    }
+
+    const normalized = content
+      .replace(/\/\/.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/#.*$/gm, '');
+
+    const counts = [
+      /\bif\b/g,
+      /\belse\b(?!\s+if)/g,
+      /\bfor\b/g,
+      /\bwhile\b/g,
+      /\bswitch\b/g,
+      /\bcatch\b/g,
+      /&&/g,
+      /\|\|/g,
+    ].reduce((sum, pattern) => sum + (normalized.match(pattern) || []).length, 0);
+
+    return 1 + counts;
+  }
+
+  private mergeDataMappings(
+    primary: DataFlowMapping[],
+    additional: DataFlowMapping[]
+  ): DataFlowMapping[] {
+    const merged = new Map<string, DataFlowMapping>();
+    for (const mapping of [...primary, ...additional]) {
+      const key = [
+        mapping.source,
+        mapping.target,
+        mapping.operation || '',
+        mapping.sourceClass || '',
+        mapping.sourceMethod || '',
+        mapping.targetClass || '',
+        mapping.targetMethod || '',
+      ].join(':');
+      if (!merged.has(key)) {
+        merged.set(key, mapping);
+      }
+    }
+
+    return Array.from(merged.values()).slice(0, 40);
+  }
+
+  private collectMethodFlowMappings(
+    symbols: CodeSymbol[],
+    content: string,
+    contentStartLine: number
+  ): DataFlowMapping[] {
+    const callableKinds = new Set(['function', 'method', 'hook', 'component', 'route', 'test', 'testSuite']);
+    const lines = content.split('\n');
+    const callables = this.collectCallableContexts(symbols).filter((entry) =>
+      callableKinds.has(entry.symbol.kind)
+    );
+    const mappings = new Map<string, DataFlowMapping>();
+
+    for (const source of callables) {
+      const body = this.extractSymbolBody(lines, source.symbol, contentStartLine);
+      if (!body.trim()) {
+        continue;
+      }
+
+      for (const target of callables) {
+        if (source.symbol.id === target.symbol.id) {
+          continue;
+        }
+
+        const targetName = this.simpleName(target.symbol.name);
+        const callPatterns = [
+          new RegExp(`\\b${this.escapeRegExp(targetName)}\\s*\\(`),
+          new RegExp(`\\b(?:this|self|cls)\\.${this.escapeRegExp(targetName)}\\s*\\(`),
+          new RegExp(`\\.[A-Za-z_][\\w]*\\s*\\.\\s*${this.escapeRegExp(targetName)}\\s*\\(`),
+          new RegExp(`\\.[A-Za-z_][\\w]*\\.${this.escapeRegExp(targetName)}\\s*\\(`),
+        ];
+
+        if (!callPatterns.some((pattern) => pattern.test(body))) {
+          continue;
+        }
+
+        const sourceLabel = this.qualifiedSymbolLabel(source.ownerClass, source.symbol.name);
+        const targetLabel = this.qualifiedSymbolLabel(target.ownerClass, target.symbol.name);
+        const mapping: DataFlowMapping = {
+          source: sourceLabel,
+          target: targetLabel,
+          sourceClass: source.ownerClass,
+          sourceMethod: this.simpleName(source.symbol.name),
+          targetClass: target.ownerClass,
+          targetMethod: this.simpleName(target.symbol.name),
+          operation: 'method-flow',
+          detail: 'Method-to-method flow detected from call usage',
+          confidence:
+            source.ownerClass && source.ownerClass === target.ownerClass ? 'high' : 'medium',
+        };
+        mappings.set(`${source.symbol.id}:${target.symbol.id}`, mapping);
+      }
+    }
+
+    return Array.from(mappings.values());
+  }
+
+  private annotateSymbolsWithMappings(
+    symbols: CodeSymbol[],
+    mappings: DataFlowMapping[]
+  ): CodeSymbol[] {
+    const annotate = (symbol: CodeSymbol, ownerClass?: string): CodeSymbol => {
+      const nextOwner =
+        symbol.kind === 'class' || symbol.kind === 'interface' || symbol.kind === 'type'
+          ? symbol.name
+          : ownerClass;
+      const children = symbol.children.map((child) => annotate(child, nextOwner));
+      const relevantMappings = mappings.filter((mapping) =>
+        this.mappingTouchesSymbol(mapping, symbol, ownerClass)
+      );
+
+      return {
+        ...symbol,
+        children,
+        dataMappings: relevantMappings.length > 0 ? relevantMappings.slice(0, 16) : undefined,
+      };
+    };
+
+    return symbols.map((symbol) => annotate(symbol));
+  }
+
+  private mappingTouchesSymbol(
+    mapping: DataFlowMapping,
+    symbol: CodeSymbol,
+    ownerClass?: string
+  ): boolean {
+    const symbolName = this.simpleName(symbol.name);
+    const symbolOwner =
+      symbol.kind === 'class' || symbol.kind === 'interface' || symbol.kind === 'type'
+        ? symbol.name
+        : ownerClass;
+
+    if (symbol.kind === 'class' || symbol.kind === 'interface' || symbol.kind === 'type') {
+      return mapping.sourceClass === symbol.name || mapping.targetClass === symbol.name;
+    }
+
+      if (['method', 'function', 'hook', 'component', 'route', 'test', 'testSuite'].includes(symbol.kind)) {
+        const matchesSource =
+        mapping.sourceMethod === symbolName
+        && (!mapping.sourceClass || mapping.sourceClass === symbolOwner);
+      const matchesTarget =
+        mapping.targetMethod === symbolName
+        && (!mapping.targetClass || mapping.targetClass === symbolOwner);
+      return matchesSource || matchesTarget;
+    }
+
+    return false;
+  }
+
+  private collectCallableContexts(
+    symbols: CodeSymbol[],
+    ownerClass?: string
+  ): Array<{ symbol: CodeSymbol; ownerClass?: string }> {
+    const collected: Array<{ symbol: CodeSymbol; ownerClass?: string }> = [];
+
+    for (const symbol of symbols) {
+      const nextOwner =
+        symbol.kind === 'class' || symbol.kind === 'interface' || symbol.kind === 'type'
+          ? symbol.name
+          : ownerClass;
+
+      if (['method', 'function', 'hook', 'component', 'route', 'test', 'testSuite'].includes(symbol.kind)) {
+        collected.push({ symbol, ownerClass });
+      }
+
+      collected.push(...this.collectCallableContexts(symbol.children, nextOwner));
+    }
+
+    return collected;
+  }
+
+  private qualifiedSymbolLabel(ownerClass: string | undefined, name: string): string {
+    return ownerClass ? `${ownerClass}.${this.simpleName(name)}` : this.simpleName(name);
   }
 
   private buildFolderGraph(rootPath: string, files: ParsedFile[]): GraphData {
@@ -533,10 +845,11 @@ export class CodeAnalyzer {
 
     this.addInheritanceEdges(allSymbols, nodes, edges, symbolIndex, symbolNameIndex);
     this.addTestFlowEdges(allSymbols, nodes, edges, symbolNameIndex);
-
-    // Call graph and data-flow artifacts are skipped in folder mode:
-    // parseFileFast intentionally sets symbols:[] and dataMappings:[] to avoid
-    // expensive O(n²) analysis and blocking I/O that caused VS Code to freeze.
+    for (const parsed of files) {
+      if (parsed.dataMappings.length > 0) {
+        this.addDataFlowArtifacts(parsed, this.fileNodeId(parsed.path), nodes, edges);
+      }
+    }
 
     this.updateTestFlowCounts(nodes, edges);
     this.updateContainerCounts(nodes, edges);
@@ -896,13 +1209,17 @@ export class CodeAnalyzer {
   ): GraphNode {
     const flattenedMembers = this.flattenSymbols(parsed.symbols);
     const topLevelMembers = parsed.symbols.filter((symbol) =>
-      ['function', 'method', 'hook', 'component', 'test', 'testSuite'].includes(symbol.kind)
+      ['function', 'method', 'hook', 'component', 'route', 'test', 'testSuite'].includes(symbol.kind)
     );
     // In folder-fast mode symbols[] is empty; use quick regex data stored by parseFileFast.
     type FastParsed = ParsedFile & { _quickClassCount?: number; _quickMethodCount?: number; _quickClassSummaries?: GraphClassSummary[] };
     const quickParsed = parsed as FastParsed;
     const methodCount = flattenedMembers.filter((symbol) =>
-      symbol.kind === 'method' || symbol.kind === 'function' || symbol.kind === 'hook' || symbol.kind === 'component'
+      symbol.kind === 'method'
+      || symbol.kind === 'function'
+      || symbol.kind === 'hook'
+      || symbol.kind === 'component'
+      || symbol.kind === 'route'
     ).length || (quickParsed._quickMethodCount ?? 0);
     const classCount = flattenedMembers.filter((symbol) =>
       symbol.kind === 'class' || symbol.kind === 'interface' || symbol.kind === 'type' || symbol.kind === 'enum'
@@ -929,7 +1246,12 @@ export class CodeAnalyzer {
     );
     // Each class block: header(44px) + label section(12px) + methods(22px each, up to 8) + divider(12px)
     const classBlockHeight = classSummaries.reduce((acc, cls) => {
-      return acc + 44 + 12 + Math.min(cls.methods.length, 8) * 22 + 12;
+      const methodRows = cls.methodDetails?.length ?? cls.methods.length;
+      const flowRows = (cls.methodDetails || []).reduce(
+        (sum, detail) => sum + (detail.flowsTo?.length || 0) + (detail.flowsFrom?.length || 0),
+        0
+      );
+      return acc + 44 + 12 + Math.min(methodRows, 10) * 22 + Math.min(flowRows, 10) * 14 + 12;
     }, 0);
     const estimatedHeight =
       210 +                                               // header + metrics grid
@@ -955,6 +1277,7 @@ export class CodeAnalyzer {
         language: parsed.language,
         lineCount: parsed.lineCount,
         byteSize: parsed.size,
+        complexity: parsed.complexity,
         imports: parsed.imports.map((imp) => imp.source),
         exports: parsed.exports,
         childCount: parsed.symbols.length,
@@ -1018,6 +1341,7 @@ export class CodeAnalyzer {
         relativePath: path.relative(this.rootPath, symbol.filePath),
         language: symbol.language,
         lineCount: symbol.lineCount,
+        complexity: symbol.complexity,
         visibility: symbol.access,
         isAsync: symbol.isAsync,
         returnType: symbol.returnType,
@@ -1026,36 +1350,18 @@ export class CodeAnalyzer {
         dependencies: symbol.dependencies,
         childCount: symbol.children.length,
         memberNames: flattenedChildren
-          .filter((child) => ['method', 'function', 'test', 'hook', 'component'].includes(child.kind))
+          .filter((child) => ['method', 'function', 'test', 'hook', 'component', 'route'].includes(child.kind))
           .map((child) => this.simpleName(child.name))
           .slice(0, 6),
         classSummaries:
           nodeType === 'class' || nodeType === 'interface' || nodeType === 'type'
             ? [
-                {
-                  name: symbol.name,
-                  kind:
-                    nodeType === 'type'
-                      ? 'type'
-                      : nodeType === 'interface'
-                        ? 'interface'
-                        : 'class',
-                  methods: flattenedChildren
-                    .filter((child) =>
-                      ['method', 'function', 'hook', 'component'].includes(child.kind)
-                    )
-                    .map((child) => this.simpleName(child.name))
-                    .slice(0, 8),
-                  tests: flattenedChildren
-                    .filter((child) => child.kind === 'test' || child.kind === 'testSuite')
-                    .map((child) => this.simpleName(child.name))
-                    .slice(0, 6),
-                  lineCount: symbol.lineCount,
-                },
+                this.buildClassSummary(symbol),
               ]
             : undefined,
+        dataMappings: symbol.dataMappings?.slice(0, 12),
         methodCount: flattenedChildren.filter((child) =>
-          ['method', 'function', 'hook', 'component'].includes(child.kind)
+          ['method', 'function', 'hook', 'component', 'route'].includes(child.kind)
         ).length,
         testCount: flattenedChildren.filter((child) =>
           child.kind === 'test' || child.kind === 'testSuite'
@@ -1339,26 +1645,66 @@ export class CodeAnalyzer {
     return symbols
       .filter((symbol) => ['class', 'interface', 'type', 'enum'].includes(symbol.kind))
       .slice(0, 4)
-      .map((symbol) => ({
-        name: symbol.name,
-        kind:
-          symbol.kind === 'enum'
-            ? 'enum'
-            : symbol.kind === 'interface'
-              ? 'interface'
-              : symbol.kind === 'type'
-                ? 'type'
-                : 'class',
-        methods: symbol.children
-          .filter((child) => ['method', 'function', 'hook', 'component'].includes(child.kind))
-          .map((child) => this.simpleName(child.name))
-          .slice(0, 8),
-        tests: symbol.children
-          .filter((child) => child.kind === 'test' || child.kind === 'testSuite')
-          .map((child) => this.simpleName(child.name))
-          .slice(0, 5),
-        lineCount: symbol.lineCount,
-      }));
+      .map((symbol) => this.buildClassSummary(symbol));
+  }
+
+  private buildClassSummary(symbol: CodeSymbol): GraphClassSummary {
+    const methodSymbols = symbol.children.filter((child) =>
+      ['method', 'function', 'hook', 'component', 'route'].includes(child.kind)
+    );
+    const testSymbols = symbol.children.filter((child) =>
+      child.kind === 'test' || child.kind === 'testSuite'
+    );
+    const fieldSymbols = symbol.children.filter((child) =>
+      child.kind === 'variable' || child.kind === 'constant'
+    );
+
+    return {
+      name: symbol.name,
+      kind:
+        symbol.kind === 'enum'
+          ? 'enum'
+          : symbol.kind === 'interface'
+            ? 'interface'
+            : symbol.kind === 'type'
+              ? 'type'
+              : 'class',
+      methods: methodSymbols.map((child) => this.simpleName(child.name)).slice(0, 12),
+      methodDetails: methodSymbols.map((child) => this.buildMethodSummary(child)).slice(0, 12),
+      tests: testSymbols.map((child) => this.simpleName(child.name)).slice(0, 6),
+      fields: fieldSymbols
+        .map((child) => child.returnType ? `${child.returnType} ${child.name}` : child.name)
+        .slice(0, 10),
+      lineCount: symbol.lineCount,
+    };
+  }
+
+  private buildMethodSummary(symbol: CodeSymbol): GraphMethodSummary {
+    const outgoing = (symbol.dataMappings || [])
+      .filter((mapping) => mapping.sourceMethod === this.simpleName(symbol.name))
+      .map((mapping) => this.mappingTargetDisplay(mapping));
+    const incoming = (symbol.dataMappings || [])
+      .filter((mapping) => mapping.targetMethod === this.simpleName(symbol.name))
+      .map((mapping) => this.mappingSourceDisplay(mapping));
+
+    return {
+      name: this.simpleName(symbol.name),
+      kind:
+        symbol.kind === 'test'
+          ? 'test'
+          : symbol.kind === 'hook'
+            ? 'hook'
+            : symbol.kind === 'component'
+              ? 'component'
+              : symbol.kind === 'route'
+                ? 'route'
+              : symbol.kind === 'function'
+                ? 'function'
+                : 'method',
+      lineCount: symbol.lineCount,
+      flowsTo: Array.from(new Set(outgoing)).slice(0, 6),
+      flowsFrom: Array.from(new Set(incoming)).slice(0, 6),
+    };
   }
 
   private buildPackageReferences(
@@ -1405,6 +1751,52 @@ export class CodeAnalyzer {
     edges: Map<string, GraphEdge>
   ): void {
     for (const mapping of parsed.dataMappings) {
+      const sourceMethodNodeId = this.resolveMethodNodeId(mapping, 'source', nodes);
+      const targetMethodNodeId = this.resolveMethodNodeId(mapping, 'target', nodes);
+      if (sourceMethodNodeId && targetMethodNodeId) {
+        this.addEdge(
+          edges,
+          this.linkEdge(
+            `methodflow:${sourceMethodNodeId}:${targetMethodNodeId}:${mapping.source}:${mapping.target}`,
+            sourceMethodNodeId,
+            targetMethodNodeId,
+            'dataFlow',
+            mapping.detail || this.mappingLabel(mapping)
+          )
+        );
+        continue;
+      }
+
+      const isInject = mapping.operation === 'inject';
+      const isCrossService = mapping.operation === 'cross-service';
+      const edgeType = isInject ? 'inject' as const : 'dataFlow' as const;
+
+      // For inject/cross-service, try to find matching class nodes in the graph
+      if (isInject || isCrossService) {
+        const sourceClassName = mapping.source.split('.')[0];
+        // Find a class node matching the source name
+        let sourceNodeId: string | undefined;
+        let targetNodeId: string | undefined;
+        for (const [id, node] of nodes) {
+          if (node.type === 'class' && node.data.label === sourceClassName) {
+            sourceNodeId = id;
+          }
+        }
+        if (sourceNodeId) {
+          this.addEdge(
+            edges,
+            this.linkEdge(
+              `${edgeType}:${sourceNodeId}:${anchorId}:${mapping.source}`,
+              sourceNodeId,
+              anchorId,
+              edgeType,
+              mapping.detail || this.mappingLabel(mapping)
+            )
+          );
+        }
+        continue;
+      }
+
       const sourceEntity = this.extractMappingEntity(mapping.source);
       const targetEntity = this.extractMappingEntity(mapping.target);
       const label = this.mappingLabel(mapping);
@@ -1539,7 +1931,66 @@ export class CodeAnalyzer {
       });
     }
 
-    return Array.from(mappings.values()).slice(0, 20);
+    // Java/Kotlin/Spring annotation-based injection patterns
+    // @Autowired, @Inject, @Resource → dependency injection data flow
+    const injectPatterns = [
+      /@(?:Autowired|Inject|Resource)\s*(?:\([^)]*\))?\s*(?:private|protected|public)?\s*(\w+)\s+(\w+)/g,
+      /(?:private|protected|public)\s+(?:final\s+)?(\w+)\s+(\w+)\s*;\s*\/\/\s*@(?:Autowired|Inject)/g,
+    ];
+    for (const pattern of injectPatterns) {
+      let injectMatch: RegExpExecArray | null;
+      while ((injectMatch = pattern.exec(content)) !== null) {
+        const serviceType = injectMatch[1];
+        const fieldName = injectMatch[2];
+        mappings.set(`inject:${serviceType}:${fieldName}`, {
+          source: serviceType,
+          target: fieldName,
+          operation: 'inject',
+          detail: `Dependency injection: ${serviceType} → ${fieldName}`,
+          confidence: 'high',
+        });
+      }
+    }
+
+    // Constructor injection pattern (common in modern Spring)
+    const ctorInjectRex = /(?:public|protected)\s+\w+\s*\(([\s\S]{1,500}?)\)\s*\{/g;
+    let ctorMatch: RegExpExecArray | null;
+    while ((ctorMatch = ctorInjectRex.exec(content)) !== null) {
+      const params = ctorMatch[1].split(',');
+      for (const param of params) {
+        const paramMatch = param.trim().match(/(?:@\w+\s+)*(\w+)\s+(\w+)\s*$/);
+        if (paramMatch) {
+          const serviceType = paramMatch[1];
+          const fieldName = paramMatch[2];
+          if (serviceType[0] === serviceType[0].toUpperCase() && serviceType.length > 1) {
+            mappings.set(`ctor-inject:${serviceType}:${fieldName}`, {
+              source: serviceType,
+              target: fieldName,
+              operation: 'inject',
+              detail: `Constructor injection: ${serviceType} → ${fieldName}`,
+              confidence: 'high',
+            });
+          }
+        }
+      }
+    }
+
+    // Method calls that pass data between services: serviceA.method(serviceB.getData())
+    const crossServiceCallRex = /(\w+)\.(\w+)\(\s*(\w+)\.(\w+)\(\)/g;
+    let crossMatch: RegExpExecArray | null;
+    while ((crossMatch = crossServiceCallRex.exec(content)) !== null) {
+      if (crossMatch[1] !== crossMatch[3]) { // Different objects
+        mappings.set(`xflow:${crossMatch[3]}.${crossMatch[4]}:${crossMatch[1]}.${crossMatch[2]}`, {
+          source: `${crossMatch[3]}.${crossMatch[4]}`,
+          target: `${crossMatch[1]}.${crossMatch[2]}`,
+          operation: 'cross-service',
+          detail: `Data flow: ${crossMatch[3]}.${crossMatch[4]}() → ${crossMatch[1]}.${crossMatch[2]}()`,
+          confidence: 'medium',
+        });
+      }
+    }
+
+    return Array.from(mappings.values()).slice(0, 30);
   }
 
   private buildAssignmentMapping(match: RegExpExecArray): DataFlowMapping | undefined {
@@ -1672,6 +2123,63 @@ export class CodeAnalyzer {
     const sourceField = mapping.source.split('.').slice(1).join('.') || mapping.source;
     const targetField = mapping.target.split('.').slice(1).join('.') || mapping.target;
     return `${sourceField} -> ${targetField}`;
+  }
+
+  private mappingSourceDisplay(mapping: DataFlowMapping): string {
+    return mapping.sourceMethod
+      ? this.qualifiedSymbolLabel(mapping.sourceClass, mapping.sourceMethod)
+      : mapping.source;
+  }
+
+  private mappingTargetDisplay(mapping: DataFlowMapping): string {
+    return mapping.targetMethod
+      ? this.qualifiedSymbolLabel(mapping.targetClass, mapping.targetMethod)
+      : mapping.target;
+  }
+
+  private resolveMethodNodeId(
+    mapping: DataFlowMapping,
+    role: 'source' | 'target',
+    nodes: Map<string, GraphNode>
+  ): string | undefined {
+    const methodName = role === 'source' ? mapping.sourceMethod : mapping.targetMethod;
+    const className = role === 'source' ? mapping.sourceClass : mapping.targetClass;
+    if (!methodName) {
+      return undefined;
+    }
+
+    for (const node of nodes.values()) {
+      if (!['method', 'function', 'test'].includes(node.type)) {
+        continue;
+      }
+
+      if (this.simpleName(String(node.data.label)) !== this.simpleName(methodName)) {
+        continue;
+      }
+
+      if (!className) {
+        return node.id;
+      }
+
+      let parentId = typeof node.data.parentId === 'string' ? node.data.parentId : undefined;
+      while (parentId) {
+        const parent = nodes.get(parentId);
+        if (!parent) {
+          break;
+        }
+
+        if (
+          ['class', 'interface', 'type'].includes(parent.type)
+          && String(parent.data.label) === className
+        ) {
+          return node.id;
+        }
+
+        parentId = typeof parent.data.parentId === 'string' ? parent.data.parentId : undefined;
+      }
+    }
+
+    return undefined;
   }
 
   private camelFromAccessor(accessor: string): string {

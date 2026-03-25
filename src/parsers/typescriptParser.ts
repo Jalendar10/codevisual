@@ -250,6 +250,28 @@ export class TypeScriptParser extends BaseParser {
           docComment: this.extractDocComment(lines, i),
         });
       }
+
+      // Express/Nest.js route handlers: router.get('/path', handler)
+      const routeMatch = trimmed.match(/(?:router|app)\.(get|post|put|delete|patch|use)\s*\(\s*['"`]([^'"]+)['"`]/);
+      if (routeMatch) {
+        symbols.push({
+          id: this.generateId(filePath, `${routeMatch[1].toUpperCase()} ${routeMatch[2]}`, 'route', i),
+          name: `${routeMatch[1].toUpperCase()} ${routeMatch[2]}`,
+          kind: 'route',
+          language: this.language,
+          filePath,
+          startLine: i + 1,
+          endLine: trimmed.includes('{') ? this.findClosingBracket(lines, i, '{', '}') + 1 : i + 1,
+          lineCount: 1,
+          children: [],
+          imports: [],
+          exports: [],
+          dependencies: [],
+          docComment: this.extractDocComment(lines, i),
+        });
+      }
+
+      // NestJS decorators: @Controller, @Injectable, @Module handled by extractDecorators
     }
 
     return symbols;

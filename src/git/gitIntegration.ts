@@ -126,6 +126,26 @@ export class GitIntegration {
     }
   }
 
+  /** Count how often files appeared in recent git history. */
+  async getHotspotScores(limit = 200): Promise<Record<string, number>> {
+    try {
+      const output = await this.exec(`git log --no-merges -n ${limit} --format= --name-only`);
+      const scores: Record<string, number> = {};
+
+      output
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .forEach((file) => {
+          scores[file] = (scores[file] || 0) + 1;
+        });
+
+      return scores;
+    } catch {
+      return {};
+    }
+  }
+
   /** Analyze all current git changes with AI */
   async analyzeGitChanges(): Promise<GitAnalysisResult> {
     const changes = await this.getChanges();

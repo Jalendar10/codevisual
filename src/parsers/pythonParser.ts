@@ -1,9 +1,10 @@
-import { CodeSymbol, ImportInfo, Language, ParameterInfo, SymbolKind } from '../types';
+import { CodeSymbol, ImportInfo, Language, ParameterInfo } from '../types';
 import { BaseParser } from './baseParser';
 
 /**
  * Parser for Python files.
- * Handles .py, .pyw files
+ * Handles multiline class/def signatures, decorators, async defs, nested classes,
+ * tabs/spaces indentation, and common class/method layouts.
  */
 export class PythonParser extends BaseParser {
   language: Language = 'python';
@@ -12,20 +13,23 @@ export class PythonParser extends BaseParser {
   parseContent(content: string, filePath: string): CodeSymbol[] {
     const symbols: CodeSymbol[] = [];
     const lines = content.split('\n');
-    const indentStack: { indent: number; endLine: number }[] = [];
 
-    for (let i = 0; i < lines.length; i++) {
+    for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i];
       const trimmed = line.trim();
-      const indent = line.length - line.trimStart().length;
+      const indent = this.indentOf(line);
 
-      if (!trimmed || trimmed.startsWith('#')) continue;
+      if (!trimmed || trimmed.startsWith('#') || indent !== 0 || trimmed.startsWith('@')) {
+        continue;
+      }
 
-      // Classes
-      const classMatch = trimmed.match(/^class\s+(\w+)(?:\(([^)]*)\))?\s*:/);
+      const signature = this.collectPythonSignature(lines, i);
+      const normalized = signature.text.replace(/\s+/g, ' ').trim();
+
+      const classMatch = normalized.match(/^class\s+(\w+)(?:\(([\s\S]*?)\))?\s*:/);
       if (classMatch) {
-        const endLine = this.findPythonBlockEnd(lines, i, indent);
-        const bases = classMatch[2]?.split(',').map(s => s.trim()).filter(Boolean) || [];
+        const endLine = this.findPythonBlockEnd(lines, signature.endLine, indent);
+        const bases = classMatch[2]?.split(',').map((part) => part.trim()).filter(Boolean) || [];
         symbols.push({
           id: this.generateId(filePath, classMatch[1], 'class', i),
           name: classMatch[1],
@@ -35,24 +39,24 @@ export class PythonParser extends BaseParser {
           startLine: i + 1,
           endLine: endLine + 1,
           lineCount: endLine - i + 1,
-          children: this.parseClassBody(lines, i, endLine, indent, filePath),
+          children: this.parseClassBody(lines, signature.endLine, endLine, indent, filePath),
           imports: [],
           exports: [],
           dependencies: bases,
           decorators: this.extractDecorators(lines, i),
-          docComment: this.extractPythonDocstring(lines, i + 1),
+          docComment: this.extractPythonDocstring(lines, signature.endLine + 1),
         });
+        i = signature.endLine;
         continue;
       }
 
-      // Functions/Methods
-      const funcMatch = trimmed.match(/^(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*(.+?))?\s*:/);
+      const funcMatch = normalized.match(/^(async\s+)?def\s+(\w+)\s*\(([\s\S]*?)\)(?:\s*->\s*([^:]+))?\s*:/);
       if (funcMatch) {
-        const endLine = this.findPythonBlockEnd(lines, i, indent);
-        const isTest = funcMatch[1].startsWith('test_') || funcMatch[1].startsWith('test');
+        const endLine = this.findPythonBlockEnd(lines, signature.endLine, indent);
+        const isTest = funcMatch[2].startsWith('test_') || funcMatch[2].startsWith('test');
         symbols.push({
-          id: this.generateId(filePath, funcMatch[1], isTest ? 'test' : 'function', i),
-          name: funcMatch[1],
+          id: this.generateId(filePath, funcMatch[2], isTest ? 'test' : 'function', i),
+          name: funcMatch[2],
           kind: isTest ? 'test' : 'function',
           language: this.language,
           filePath,
@@ -63,19 +67,21 @@ export class PythonParser extends BaseParser {
           imports: [],
           exports: [],
           dependencies: [],
-          isAsync: trimmed.startsWith('async'),
-          parameters: this.parsePythonParams(funcMatch[2]),
-          returnType: funcMatch[3]?.trim(),
+          isAsync: !!funcMatch[1],
+          parameters: this.parseParameters(funcMatch[3]).filter(
+            (parameter) => parameter.name !== 'self' && parameter.name !== 'cls'
+          ),
+          returnType: funcMatch[4]?.trim(),
           decorators: this.extractDecorators(lines, i),
-          docComment: this.extractPythonDocstring(lines, i + 1),
-          testsTarget: isTest ? this.inferTestTarget(funcMatch[1]) : undefined,
+          docComment: this.extractPythonDocstring(lines, signature.endLine + 1),
+          testsTarget: isTest ? this.inferTestTarget(funcMatch[2]) : undefined,
         });
+        i = signature.endLine;
         continue;
       }
 
-      // Module-level constants (ALL_CAPS)
-      const constMatch = trimmed.match(/^([A-Z_][A-Z0-9_]*)\s*(?::\s*\w+\s*)?=/);
-      if (constMatch && indent === 0) {
+      const constMatch = trimmed.match(/^([A-Z_][A-Z0-9_]*)\s*(?::\s*[^=]+)?=/);
+      if (constMatch) {
         symbols.push({
           id: this.generateId(filePath, constMatch[1], 'constant', i),
           name: constMatch[1],
@@ -100,30 +106,35 @@ export class PythonParser extends BaseParser {
     const imports: ImportInfo[] = [];
     const lines = content.split('\n');
 
-    for (let i = 0; i < lines.length; i++) {
+    for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i].trim();
 
-      // from X import Y, Z
       const fromImport = line.match(/^from\s+([\w.]+)\s+import\s+(.+)/);
       if (fromImport) {
         const source = fromImport[1];
         let specifiers: string[];
         if (fromImport[2].startsWith('(')) {
-          // Multi-line import
           let importStr = fromImport[2];
           while (!importStr.includes(')') && i < lines.length - 1) {
-            i++;
+            i += 1;
             importStr += lines[i].trim();
           }
-          specifiers = importStr.replace(/[()]/g, '').split(',').map(s => s.trim().split(' as ')[0]).filter(Boolean);
+          specifiers = importStr
+            .replace(/[()]/g, '')
+            .split(',')
+            .map((value) => value.trim().split(' as ')[0])
+            .filter(Boolean);
         } else {
-          specifiers = fromImport[2].split(',').map(s => s.trim().split(' as ')[0]).filter(Boolean);
+          specifiers = fromImport[2]
+            .split(',')
+            .map((value) => value.trim().split(' as ')[0])
+            .filter(Boolean);
         }
+
         imports.push({ source, specifiers, isDefault: false, isNamespace: false, line: i + 1 });
         continue;
       }
 
-      // import X
       const directImport = line.match(/^import\s+([\w.]+)(?:\s+as\s+(\w+))?/);
       if (directImport) {
         imports.push({
@@ -146,44 +157,100 @@ export class PythonParser extends BaseParser {
       /tests?\//,
       /conftest\.py$/,
     ];
-    if (testPatterns.some(p => p.test(filePath))) return true;
+    if (testPatterns.some((pattern) => pattern.test(filePath))) {
+      return true;
+    }
     return /\b(pytest|unittest|assert|TestCase)\b/.test(content.slice(0, 2000));
   }
 
-  private findPythonBlockEnd(lines: string[], startLine: number, startIndent: number): number {
-    for (let i = startLine + 1; i < lines.length; i++) {
-      const line = lines[i];
-      const trimmed = line.trim();
-      if (!trimmed) continue; // Skip blank lines
+  protected parseSingleParam(param: string): ParameterInfo {
+    const cleaned = param.trim();
+    const match = cleaned.match(/^(\*{0,2}\w+)(?:\s*:\s*(.+?))?(?:\s*=\s*(.+))?$/);
+    if (!match) {
+      return { name: cleaned };
+    }
 
-      const currentIndent = line.length - line.trimStart().length;
-      if (currentIndent <= startIndent && trimmed !== '') {
+    return {
+      name: match[1],
+      type: match[2]?.trim(),
+      defaultValue: match[3]?.trim(),
+      isOptional: !!match[3],
+    };
+  }
+
+  private findPythonBlockEnd(lines: string[], startLine: number, startIndent: number): number {
+    for (let i = startLine + 1; i < lines.length; i += 1) {
+      const trimmed = lines[i].trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const currentIndent = this.indentOf(lines[i]);
+      if (currentIndent <= startIndent) {
         return i - 1;
       }
     }
+
     return lines.length - 1;
   }
 
-  private parseClassBody(lines: string[], startLine: number, endLine: number, classIndent: number, filePath: string): CodeSymbol[] {
+  private parseClassBody(
+    lines: string[],
+    declarationEndLine: number,
+    endLine: number,
+    classIndent: number,
+    filePath: string
+  ): CodeSymbol[] {
     const members: CodeSymbol[] = [];
-    const memberIndent = classIndent + 4; // Standard Python indent
+    const memberIndent = this.findMemberIndent(lines, declarationEndLine + 1, endLine, classIndent);
 
-    for (let i = startLine + 1; i <= endLine; i++) {
+    for (let i = declarationEndLine + 1; i <= endLine; i += 1) {
       const line = lines[i];
       const trimmed = line.trim();
-      const indent = line.length - line.trimStart().length;
+      const indent = this.indentOf(line);
 
-      if (!trimmed || indent < memberIndent) continue;
+      if (!trimmed || trimmed.startsWith('#') || indent !== memberIndent || trimmed.startsWith('@')) {
+        continue;
+      }
 
-      const methodMatch = trimmed.match(/^(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*(.+?))?\s*:/);
-      if (methodMatch && indent === memberIndent) {
-        const methodEnd = this.findPythonBlockEnd(lines, i, indent);
-        const isPrivate = methodMatch[1].startsWith('_') && !methodMatch[1].startsWith('__');
-        const isDunder = methodMatch[1].startsWith('__') && methodMatch[1].endsWith('__');
+      const signature = this.collectPythonSignature(lines, i);
+      const normalized = signature.text.replace(/\s+/g, ' ').trim();
+
+      const nestedClassMatch = normalized.match(/^class\s+(\w+)(?:\(([\s\S]*?)\))?\s*:/);
+      if (nestedClassMatch) {
+        const nestedEnd = this.findPythonBlockEnd(lines, signature.endLine, indent);
         members.push({
-          id: this.generateId(filePath, methodMatch[1], 'method', i),
-          name: methodMatch[1],
-          kind: 'method',
+          id: this.generateId(filePath, nestedClassMatch[1], 'class', i),
+          name: nestedClassMatch[1],
+          kind: 'class',
+          language: this.language,
+          filePath,
+          startLine: i + 1,
+          endLine: nestedEnd + 1,
+          lineCount: nestedEnd - i + 1,
+          children: this.parseClassBody(lines, signature.endLine, nestedEnd, indent, filePath),
+          imports: [],
+          exports: [],
+          dependencies:
+            nestedClassMatch[2]?.split(',').map((part) => part.trim()).filter(Boolean) || [],
+          decorators: this.extractDecorators(lines, i),
+          docComment: this.extractPythonDocstring(lines, signature.endLine + 1),
+        });
+        i = signature.endLine;
+        continue;
+      }
+
+      const methodMatch = normalized.match(/^(async\s+)?def\s+(\w+)\s*\(([\s\S]*?)\)(?:\s*->\s*([^:]+))?\s*:/);
+      if (methodMatch) {
+        const methodEnd = this.findPythonBlockEnd(lines, signature.endLine, indent);
+        const isPrivate = methodMatch[2].startsWith('_') && !methodMatch[2].startsWith('__');
+        const isDunder = methodMatch[2].startsWith('__') && methodMatch[2].endsWith('__');
+        const isTest = methodMatch[2].startsWith('test_') || methodMatch[2].startsWith('test');
+
+        members.push({
+          id: this.generateId(filePath, methodMatch[2], isTest ? 'test' : 'method', i),
+          name: methodMatch[2],
+          kind: isTest ? 'test' : 'method',
           language: this.language,
           filePath,
           startLine: i + 1,
@@ -194,57 +261,134 @@ export class PythonParser extends BaseParser {
           exports: [],
           dependencies: [],
           access: isDunder ? 'public' : isPrivate ? 'private' : 'public',
-          isAsync: trimmed.startsWith('async'),
-          parameters: this.parsePythonParams(methodMatch[2]),
-          returnType: methodMatch[3]?.trim(),
+          isAsync: !!methodMatch[1],
+          parameters: this.parseParameters(methodMatch[3]).filter(
+            (parameter) => parameter.name !== 'self' && parameter.name !== 'cls'
+          ),
+          returnType: methodMatch[4]?.trim(),
           decorators: this.extractDecorators(lines, i),
-          docComment: this.extractPythonDocstring(lines, i + 1),
+          docComment: this.extractPythonDocstring(lines, signature.endLine + 1),
+          testsTarget: isTest ? this.inferTestTarget(methodMatch[2]) : undefined,
+        });
+        i = signature.endLine;
+        continue;
+      }
+
+      const fieldMatch = trimmed.match(/^(\w+)\s*(?::\s*(\w[^\s=]*))?(?:\s*=\s*(.+))?$/);
+      if (
+        fieldMatch
+        && !trimmed.startsWith('return')
+        && !trimmed.startsWith('if ')
+        && !trimmed.startsWith('for ')
+        && !trimmed.startsWith('while ')
+      ) {
+        members.push({
+          id: this.generateId(filePath, fieldMatch[1], 'variable', i),
+          name: fieldMatch[1],
+          kind: 'variable',
+          language: this.language,
+          filePath,
+          startLine: i + 1,
+          endLine: i + 1,
+          lineCount: 1,
+          children: [],
+          imports: [],
+          exports: [],
+          dependencies: [],
+          returnType: fieldMatch[2]?.trim(),
         });
       }
     }
+
     return members;
   }
 
-  private parsePythonParams(paramString: string): ParameterInfo[] {
-    if (!paramString.trim()) return [];
-    return paramString
-      .split(',')
-      .map(p => p.trim())
-      .filter(p => p && p !== 'self' && p !== 'cls')
-      .map(p => {
-        const match = p.match(/^(\*{0,2}\w+)(?:\s*:\s*(.+?))?(?:\s*=\s*(.+))?$/);
-        if (match) {
-          return {
-            name: match[1],
-            type: match[2]?.trim(),
-            defaultValue: match[3]?.trim(),
-            isOptional: !!match[3],
-          };
+  private collectPythonSignature(
+    lines: string[],
+    startLine: number
+  ): { text: string; endLine: number } {
+    const collected: string[] = [];
+    let nestingDepth = 0;
+
+    for (let i = startLine; i < lines.length; i += 1) {
+      const trimmed = lines[i].trim();
+      if (!trimmed && collected.length === 0) {
+        return { text: '', endLine: i };
+      }
+
+      if (!trimmed) {
+        continue;
+      }
+
+      collected.push(trimmed);
+      for (const char of trimmed) {
+        if (char === '(' || char === '[' || char === '{') {
+          nestingDepth += 1;
+        } else if (char === ')' || char === ']' || char === '}') {
+          nestingDepth = Math.max(0, nestingDepth - 1);
         }
-        return { name: p };
-      });
+      }
+
+      if (nestingDepth === 0 && /:\s*(#.*)?$/.test(trimmed)) {
+        return {
+          text: collected.join(' '),
+          endLine: i,
+        };
+      }
+    }
+
+    return {
+      text: collected.join(' '),
+      endLine: startLine,
+    };
+  }
+
+  private findMemberIndent(
+    lines: string[],
+    startLine: number,
+    endLine: number,
+    parentIndent: number
+  ): number {
+    for (let i = startLine; i <= endLine; i += 1) {
+      const trimmed = lines[i].trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        continue;
+      }
+
+      const indent = this.indentOf(lines[i]);
+      if (indent > parentIndent) {
+        return indent;
+      }
+    }
+
+    return parentIndent + 4;
+  }
+
+  private indentOf(line: string): number {
+    return line.length - line.trimStart().length;
   }
 
   private extractPythonDocstring(lines: string[], afterDefLine: number): string | undefined {
-    for (let i = afterDefLine; i < Math.min(afterDefLine + 3, lines.length); i++) {
+    for (let i = afterDefLine; i < Math.min(afterDefLine + 4, lines.length); i += 1) {
       const trimmed = lines[i].trim();
       if (trimmed.startsWith('"""') || trimmed.startsWith("'''")) {
         const quote = trimmed.slice(0, 3);
         if (trimmed.endsWith(quote) && trimmed.length > 6) {
           return trimmed.slice(3, -3);
         }
-        // Multi-line docstring
+
         const parts: string[] = [trimmed.slice(3)];
-        for (let j = i + 1; j < lines.length; j++) {
-          const jTrimmed = lines[j].trim();
-          if (jTrimmed.includes(quote)) {
-            parts.push(jTrimmed.replace(quote, ''));
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const inner = lines[j].trim();
+          if (inner.includes(quote)) {
+            parts.push(inner.replace(quote, ''));
             return parts.join('\n').trim();
           }
-          parts.push(jTrimmed);
+          parts.push(inner);
         }
       }
     }
+
     return undefined;
   }
 

@@ -21,6 +21,7 @@ import {
   CodePreview,
   GraphData,
   GraphEdge,
+  GraphClassSummary,
   GraphLayoutAlgorithm,
   GraphNode,
   GraphNodeData,
@@ -39,6 +40,7 @@ type FlowNode = Node<GraphNodeData>;
 type FlowEdge = Edge;
 type ActiveTab = 'visual' | 'settings';
 type StatusTone = 'info' | 'success' | 'warning' | 'error';
+type HeatOverlayMode = 'none' | 'complexity' | 'hotspot';
 
 const nodeTypes = {
   folder: FolderNode,
@@ -68,20 +70,30 @@ const defaultVisibility = {
 
 export default function App() {
   const vscode = useVSCodeAPI();
-  const state = vscode.getState<{ layout?: GraphLayoutAlgorithm; activeTab?: ActiveTab }>();
+  const state = vscode.getState<{
+    layout?: GraphLayoutAlgorithm;
+    activeTab?: ActiveTab;
+    overlayMode?: HeatOverlayMode;
+    graphData?: GraphData;
+  }>();
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const appShellRef = useRef<HTMLDivElement | null>(null);
+  const selectedNodeIdRef = useRef<string | null>(null);
+  const mappingFocusNodeIdRef = useRef<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const [graph, setGraph] = useState<GraphData | null>(null);
-  const [rawNodes, setRawNodes] = useState<GraphNode[]>([]);
-  const [rawEdges, setRawEdges] = useState<GraphEdge[]>([]);
+  // Restore graph from persisted webview state so the panel isn't blank
+  // when VS Code re-creates it (e.g. after dragging to another window).
+  const [graph, setGraph] = useState<GraphData | null>(state?.graphData ?? null);
+  const [rawNodes, setRawNodes] = useState<GraphNode[]>(state?.graphData?.nodes ?? []);
+  const [rawEdges, setRawEdges] = useState<GraphEdge[]>(state?.graphData?.edges ?? []);
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
   const [layout, setLayout] = useState<GraphLayoutAlgorithm>(
     state?.layout || 'hierarchical'
   );
   const [activeTab, setActiveTab] = useState<ActiveTab>(state?.activeTab || 'visual');
+  const [overlayMode, setOverlayMode] = useState<HeatOverlayMode>(state?.overlayMode || 'none');
   const [visibility, setVisibility] = useState(defaultVisibility);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -111,20 +123,36 @@ export default function App() {
     webhookSecret: '',
   });
   const [lastAiRequestNodeId, setLastAiRequestNodeId] = useState<string | null>(null);
+  const [aiModels, setAiModels] = useState<Array<{ id: string; family: string }>>([]);
   const [aiStatus, setAiStatus] = useState({
     available: false,
     provider: 'GitHub Copilot',
     message: 'Checking Copilot availability…',
+    model: 'auto',
   });
   const [aiAnalysis, setAiAnalysis] = useState<{
     targetLabel: string;
     analysis: AIAnalysisResult;
   } | null>(null);
+  const [testDiff, setTestDiff] = useState<{
+    targetLabel: string;
+    missingScenarios: string;
+    testFilePath?: string;
+    sourceFilePath?: string;
+  } | null>(null);
   const [instance, setInstance] = useState<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
 
   useEffect(() => {
-    vscode.setState({ layout, activeTab });
-  }, [activeTab, layout, vscode]);
+    vscode.setState({ layout, activeTab, overlayMode, graphData: graph ?? undefined });
+  }, [activeTab, layout, overlayMode, graph, vscode]);
+
+  useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
+  }, [selectedNodeId]);
+
+  useEffect(() => {
+    mappingFocusNodeIdRef.current = mappingFocusNodeId;
+  }, [mappingFocusNodeId]);
 
   // Clear stale AI analysis whenever the user selects a different node
   useEffect(() => {
@@ -140,22 +168,36 @@ export default function App() {
 
       switch (message.type) {
         case 'updateGraph':
+          {
+          const preservedSelection =
+            selectedNodeIdRef.current &&
+            message.data.nodes.some((node) => node.id === selectedNodeIdRef.current)
+              ? selectedNodeIdRef.current
+              : null;
+          const preservedMappingFocus =
+            mappingFocusNodeIdRef.current &&
+            message.data.nodes.some((node) => node.id === mappingFocusNodeIdRef.current)
+              ? mappingFocusNodeIdRef.current
+              : null;
           setGraph(message.data);
           setRawNodes(message.data.nodes);
           setRawEdges(message.data.edges);
-          setSelectedNodeId(null);
+          setSelectedNodeId(preservedSelection);
           setAiAnalysis(null);
           setCodePreview(null);
           setContextMenu(null);
-          setMappingFocusNodeId(null);
+          setMappingFocusNodeId(preservedMappingFocus);
           setAffectedNodeIds([]);
           setTestSummary(null);
           setError(null);
           setIsLoading(false);
           setStatusMessage(null);
           // Request fitView for the new graph
-          fitViewTrigger.current += 1;
+          if (!preservedSelection) {
+            fitViewTrigger.current += 1;
+          }
           break;
+          }
         case 'aiAnalysis':
           setAiAnalysis({ targetLabel: message.targetLabel, analysis: message.analysis });
           setRawNodes((current) =>
@@ -183,8 +225,22 @@ export default function App() {
             available: message.available,
             provider: message.provider,
             message: message.message,
+            model: (message as any).model || 'auto',
           });
           break;
+        case 'aiModels':
+          setAiModels((message as any).models || []);
+          break;
+        case 'testDiffResult': {
+          const tdMsg = message as any;
+          setTestDiff({
+            targetLabel: tdMsg.targetLabel,
+            missingScenarios: tdMsg.missingScenarios,
+            testFilePath: tdMsg.testFilePath,
+            sourceFilePath: tdMsg.sourceFilePath,
+          });
+          break;
+        }
         case 'codePreview':
           setCodePreview(message.preview);
           break;
@@ -235,8 +291,17 @@ export default function App() {
   useEffect(() => {
     if (activeTab === 'settings') {
       vscode.postMessage({ type: 'requestGitData' });
+      vscode.postMessage({ type: 'requestModels' });
     }
   }, [activeTab, vscode]);
+
+  const dependencyImpact = useMemo(
+    () =>
+      mappingFocusNodeId
+        ? emptyDependencyImpact()
+        : collectDependencyImpact(selectedNodeId, rawEdges),
+    [mappingFocusNodeId, rawEdges, selectedNodeId]
+  );
 
   useEffect(() => {
     const rendered = buildRenderableGraph(
@@ -246,7 +311,9 @@ export default function App() {
       searchQuery,
       layout,
       mappingFocusNodeId,
-      affectedNodeIds
+      affectedNodeIds,
+      dependencyImpact,
+      overlayMode
     );
     setNodes(rendered.nodes);
     setEdges(rendered.edges);
@@ -267,6 +334,8 @@ export default function App() {
     layout,
     mappingFocusNodeId,
     affectedNodeIds,
+    dependencyImpact,
+    overlayMode,
     instance,
     setEdges,
     setNodes,
@@ -280,6 +349,49 @@ export default function App() {
     const timer = window.setTimeout(() => setStatusMessage(null), 5000);
     return () => window.clearTimeout(timer);
   }, [statusMessage]);
+
+  useEffect(() => {
+    const tick = graph?.metadata.changeEvent?.updatedAt;
+    if (!tick) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setRawNodes((current) =>
+        current.map((node) =>
+          node.data.changed
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  changed: false,
+                },
+              }
+            : node
+        )
+      );
+      setGraph((current) =>
+        current
+          ? {
+              ...current,
+              nodes: current.nodes.map((node) =>
+                node.data.changed
+                  ? {
+                      ...node,
+                      data: {
+                        ...node.data,
+                        changed: false,
+                      },
+                    }
+                  : node
+              ),
+            }
+          : current
+      );
+    }, 1600);
+
+    return () => window.clearTimeout(timer);
+  }, [graph?.metadata.changeEvent?.updatedAt]);
 
   const selectedNode = useMemo(() => {
     return rawNodes.find((node) => node.id === selectedNodeId) || null;
@@ -305,7 +417,7 @@ export default function App() {
     const folderNodes = rawNodes.filter((node) => node.type === 'folder').length;
     const testEdges = rawEdges.filter((edge) => edge.type === 'testFlow').length;
     const importEdges = rawEdges.filter((edge) => edge.type === 'import').length;
-    const dataFlowEdges = rawEdges.filter((edge) => edge.type === 'dataFlow').length;
+    const dataFlowEdges = rawEdges.filter((edge) => edge.type === 'dataFlow' || edge.type === 'sqlMapping' || edge.type === 'inject').length;
     const packageNodes = rawNodes.filter(
       (node) => node.type === 'external' && node.data.kind === 'package'
     ).length;
@@ -543,6 +655,60 @@ export default function App() {
     [analysisTargetNode, rawNodes, selectedNode, vscode]
   );
 
+  const requestTestDiff = useCallback(
+    (nodeId?: string) => {
+      const targetNode =
+        rawNodes.find((node) => node.id === nodeId) ||
+        selectedNode ||
+        analysisTargetNode;
+      if (!targetNode) {
+        setStatusMessage({
+          level: 'warning',
+          message: 'Select a file, class, or method node first.',
+        });
+        return;
+      }
+      vscode.postMessage({ type: 'requestTestDiff', nodeId: targetNode.id } as any);
+      setStatusMessage({
+        level: 'info',
+        message: `Analyzing test gaps for ${targetNode.data.label}…`,
+      });
+    },
+    [analysisTargetNode, rawNodes, selectedNode, vscode]
+  );
+
+  const applySuggestion = useCallback(
+    (suggestion: { line?: number; endLine?: number; original?: string; suggested?: string }) => {
+      const targetPath =
+        selectedNode?.data.filePath ||
+        analysisTargetNode?.data.filePath;
+      if (!targetPath || !suggestion.suggested) {
+        setStatusMessage({ level: 'warning', message: 'No file context to apply suggestion.' });
+        return;
+      }
+      vscode.postMessage({
+        type: 'applySuggestion',
+        filePath: targetPath,
+        line: suggestion.line || 0,
+        endLine: suggestion.endLine,
+        original: suggestion.original || '',
+        suggested: suggestion.suggested || '',
+      } as any);
+    },
+    [analysisTargetNode, selectedNode, vscode]
+  );
+
+  const runTestsForSelected = useCallback(() => {
+    const targetPath =
+      selectedNode?.data.filePath ||
+      analysisTargetNode?.data.filePath;
+    if (!targetPath) {
+      setStatusMessage({ level: 'warning', message: 'Select a file node to run its tests.' });
+      return;
+    }
+    vscode.postMessage({ type: 'runTestsForFile', filePath: targetPath } as any);
+  }, [analysisTargetNode, selectedNode, vscode]);
+
   const collapseAll = useCallback(() => {
     setRawNodes((current) =>
       current.map((node) =>
@@ -607,12 +773,19 @@ export default function App() {
           <span>{graph?.metadata.totalFiles || 0} files</span>
           <span>{graph?.metadata.totalSymbols || 0} symbols</span>
           <span>{graphStats.dataFlowEdges} data flows</span>
+          {overlayMode !== 'none' ? <span>{overlayMode} overlay</span> : null}
           {testSummary ? (
             <span>
               tests {testSummary.passed} pass / {testSummary.failed} fail
             </span>
           ) : null}
           {mappingTargetNode ? <span>mapping {mappingTargetNode.data.label}</span> : null}
+          {!mappingFocusNodeId && selectedNodeId ? (
+            <span>
+              impact {dependencyImpact.upstreamNodes.size}/{dependencyImpact.downstreamNodes.size}
+            </span>
+          ) : null}
+          {graph && graph.metadata.type !== 'selection' ? <span>live refresh</span> : null}
           <span>{edges.length} edges</span>
         </div>
       </div>
@@ -643,6 +816,28 @@ export default function App() {
               <button onClick={fitView}>Fit View</button>
               <button onClick={collapseAll} title="Collapse all folders">Collapse</button>
               <button onClick={expandAll} title="Expand all folders">Expand</button>
+              <button
+                className={overlayMode === 'complexity' ? 'is-active' : ''}
+                onClick={() =>
+                  setOverlayMode((current) =>
+                    current === 'complexity' ? 'none' : 'complexity'
+                  )
+                }
+                title="Color nodes by estimated cyclomatic complexity"
+              >
+                Complexity
+              </button>
+              <button
+                className={overlayMode === 'hotspot' ? 'is-active' : ''}
+                onClick={() =>
+                  setOverlayMode((current) =>
+                    current === 'hotspot' ? 'none' : 'hotspot'
+                  )
+                }
+                title="Color nodes by git change frequency"
+              >
+                Hotspots
+              </button>
               <button
                 className={visibility.folders ? 'is-active' : ''}
                 onClick={() => toggleVisibility('folders')}
@@ -698,6 +893,7 @@ export default function App() {
                 Data Flow
               </button>
               <button onClick={runTests}>Run Tests</button>
+              <button onClick={() => vscode.postMessage({ type: 'requestRefresh' })} title="Re-analyze and refresh the graph">Refresh</button>
             </div>
 
             <div className="toolbar__stats">
@@ -737,7 +933,14 @@ export default function App() {
               >
                 <Background gap={22} size={1.2} variant={BackgroundVariant.Dots} />
                 <MiniMap
-                  nodeColor={(node) => nodeColor(node.type as GraphNodeType)}
+                  nodeColor={(node) =>
+                    nodeColor(
+                      node.type as GraphNodeType,
+                      overlayMode,
+                      Number((node.data as GraphNodeData)?.complexityRank || 0),
+                      Number((node.data as GraphNodeData)?.hotspotRank || 0)
+                    )
+                  }
                   zoomable
                   pannable
                 />
@@ -758,9 +961,14 @@ export default function App() {
                     return (
                       <>
                         {['class', 'method', 'function', 'file'].includes(menuNode.type || '') ? (
-                          <button onClick={() => generateTests(contextMenu.nodeId)}>
-                            Create Tests
-                          </button>
+                          <>
+                            <button onClick={() => generateTests(contextMenu.nodeId)}>
+                              Create Tests
+                            </button>
+                            <button onClick={() => { requestTestDiff(contextMenu.nodeId); setContextMenu(null); }}>
+                              Test Diff
+                            </button>
+                          </>
                         ) : null}
                         {menuNode.data.filePath ? (
                           <button
@@ -862,6 +1070,14 @@ export default function App() {
                   <span>Mappings</span>
                   <strong>{selectedNode.data.dataMappings?.length || 0}</strong>
                 </div>
+                <div>
+                  <span>Complexity</span>
+                  <strong>{selectedNode.data.complexity || 0}</strong>
+                </div>
+                <div>
+                  <span>Hotspot</span>
+                  <strong>{selectedNode.data.hotspotScore || 0}</strong>
+                </div>
               </div>
               <div className="detail-sidebar__actions">
                 <button onClick={viewSelectedCode} disabled={!selectedNode.data.filePath}>
@@ -898,6 +1114,24 @@ export default function App() {
                   Create Tests
                 </button>
                 <button
+                  onClick={() => requestTestDiff(selectedNode.id)}
+                  disabled={
+                    !aiStatus.available ||
+                    !selectedNode.data.filePath ||
+                    !['class', 'method', 'function', 'file'].includes(selectedNode.type || '')
+                  }
+                  title="Find missing test scenarios by comparing source with test file"
+                >
+                  Test Diff
+                </button>
+                <button
+                  onClick={runTestsForSelected}
+                  disabled={!selectedNode.data.filePath}
+                  title="Run tests for this file using the correct language runner"
+                >
+                  Run Tests
+                </button>
+                <button
                   className={mappingFocusNodeId === mappingTargetNode?.id ? 'is-active' : ''}
                   onClick={toggleMappingHighlight}
                 >
@@ -915,6 +1149,17 @@ export default function App() {
                   </strong>
                 </div>
               ) : null}
+              {!mappingFocusNodeId &&
+              (dependencyImpact.upstreamNodes.size > 0 || dependencyImpact.downstreamNodes.size > 0) ? (
+                <div className="detail-sidebar__stack">
+                  <span>Dependency Impact</span>
+                  <strong>
+                    {dependencyImpact.upstreamNodes.size} dependents upstream
+                    {' · '}
+                    {dependencyImpact.downstreamNodes.size} dependencies downstream
+                  </strong>
+                </div>
+              ) : null}
               {selectedNode.data.dataMappings?.length ? (
                 <div className="detail-sidebar__stack">
                   <span>Data Flow</span>
@@ -929,16 +1174,7 @@ export default function App() {
               {selectedNode.data.classSummaries?.length ? (
                 <div className="detail-sidebar__stack">
                   <span>Classes &amp; Methods</span>
-                  <strong>
-                    {selectedNode.data.classSummaries.slice(0, 3).map((cls) => (
-                      <div key={cls.name} style={{ marginBottom: 4 }}>
-                        <em style={{ color: 'var(--accent-cyan)' }}>{cls.name}</em>
-                        {cls.methods.slice(0, 5).map((m) => (
-                          <div key={m} style={{ paddingLeft: 8, fontSize: 10, opacity: 0.8 }}>• {m}</div>
-                        ))}
-                      </div>
-                    ))}
-                  </strong>
+                  <DetailClassSummaries summaries={selectedNode.data.classSummaries} />
                 </div>
               ) : null}
               {testSummary?.affectedTargets?.length ? (
@@ -954,15 +1190,85 @@ export default function App() {
                   <div className="detail-sidebar__ai-scores">
                     <span>Quality: {aiAnalysis.analysis.codeQuality}/100</span>
                     <span>Issues: {aiAnalysis.analysis.issues.length}</span>
-                    <span>Coverage: {aiAnalysis.analysis.testCoverage}</span>
+                    <span>Suggestions: {aiAnalysis.analysis.suggestions.length}</span>
                   </div>
                   {aiAnalysis.analysis.issues.slice(0, 3).map((issue, i) => (
-                    <div key={i} style={{ fontSize: 10, opacity: 0.85 }}>
+                    <div key={`issue-${i}`} style={{ fontSize: 10, opacity: 0.85 }}>
                       ⚠ {issue.message}
                     </div>
                   ))}
+                  {aiAnalysis.analysis.suggestions.slice(0, 5).map((sug, i) => (
+                    <div key={`sug-${i}`} className="detail-sidebar__suggestion">
+                      <div className="detail-sidebar__suggestion-header">
+                        <span className={`suggestion-badge is-${sug.priority}`}>{sug.priority}</span>
+                        {sug.line ? (
+                          <span style={{ fontSize: 9, opacity: 0.6, marginLeft: 4 }}>
+                            L{sug.line}{sug.endLine ? `–${sug.endLine}` : ''}
+                          </span>
+                        ) : null}
+                        <strong>Suggestion {i + 1}: {sug.message}</strong>
+                      </div>
+                      {sug.description ? <p style={{ fontSize: 10, opacity: 0.7 }}>{sug.description}</p> : null}
+                      {sug.original ? (
+                        <pre className="detail-sidebar__code-diff is-original">{sug.original}</pre>
+                      ) : null}
+                      {(sug.suggested || sug.code) ? (
+                        <pre className="detail-sidebar__code-diff is-suggested">{sug.suggested || sug.code}</pre>
+                      ) : null}
+                      {(sug.suggested || sug.code) ? (
+                        <button
+                          className="apply-btn"
+                          onClick={() => applySuggestion(sug)}
+                          title={`Apply this fix${sug.line ? ` at line ${sug.line}` : ''}`}
+                        >
+                          Apply to File{sug.line ? ` (L${sug.line})` : ''}
+                        </button>
+                      ) : null}
+                    </div>
+                  ))}
+                  <button
+                    className="detail-sidebar__close"
+                    onClick={() => setAiAnalysis(null)}
+                    style={{ marginTop: 6 }}
+                  >
+                    Close Analysis
+                  </button>
                 </div>
               ) : null}
+              {testDiff && (
+                <div className="detail-sidebar__ai">
+                  <div className="detail-sidebar__ai-title">
+                    Test Diff · {testDiff.targetLabel}
+                    <button
+                      className="banner-close"
+                      onClick={() => setTestDiff(null)}
+                      style={{ marginLeft: 'auto' }}
+                      title="Close"
+                    >
+                      x
+                    </button>
+                  </div>
+                  <p style={{ fontSize: 11, opacity: 0.7 }}>
+                    Missing test scenarios found. Copy and add to your test file
+                    {testDiff.testFilePath ? ` (${testDiff.testFilePath.split('/').pop()})` : ''}.
+                  </p>
+                  <pre className="detail-sidebar__code-diff is-suggested" style={{ maxHeight: 300, overflow: 'auto' }}>
+                    {testDiff.missingScenarios}
+                  </pre>
+                  {testDiff.testFilePath ? (
+                    <button
+                      onClick={() => {
+                        vscode.postMessage({
+                          type: 'goToLocation',
+                          data: { filePath: testDiff.testFilePath! },
+                        });
+                      }}
+                    >
+                      Open Test File
+                    </button>
+                  ) : null}
+                </div>
+              )}
               {codePreview?.nodeId === selectedNode.id ? (
                 <div className="code-preview-grid">
                   <CodeSection
@@ -1162,10 +1468,39 @@ export default function App() {
               <span className={`status-pill ${aiStatus.available ? 'is-success' : 'is-warning'}`}>
                 {aiStatus.available ? 'Available' : 'Unavailable'}
               </span>
+              <span className="status-pill is-info">
+                Model: {aiStatus.model || 'auto'}
+              </span>
             </div>
+            <div className="settings-grid">
+              <label className="settings-field">
+                <span>AI Model</span>
+                <select
+                  value={aiStatus.model || 'auto'}
+                  onChange={(event) => {
+                    vscode.postMessage({ type: 'selectModel', modelId: event.target.value } as any);
+                  }}
+                >
+                  <option value="auto">auto (best available)</option>
+                  {aiModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.id} ({m.family})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {aiModels.length === 0 && aiStatus.available && (
+              <p style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>
+                Loading models… If none appear, use Command Palette → "CodeFlow: List Available Copilot Models".
+              </p>
+            )}
             <div className="settings-actions">
               <button onClick={requestAiAnalysis} disabled={!aiStatus.available}>
                 Analyze Selected Node
+              </button>
+              <button onClick={() => vscode.postMessage({ type: 'requestModels' })}>
+                Reload Models
               </button>
               <button onClick={() => setActiveTab('visual')}>Back To Visual</button>
             </div>
@@ -1183,7 +1518,10 @@ export default function App() {
             )}
             {aiAnalysis && (
               <div className="analysis-card">
-                <h4>{aiAnalysis.targetLabel}</h4>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h4>{aiAnalysis.targetLabel}</h4>
+                  <button className="banner-close" onClick={() => setAiAnalysis(null)} title="Close">x</button>
+                </div>
                 <p>{aiAnalysis.analysis.summary}</p>
                 <div className="stats-grid">
                   <div>
@@ -1208,7 +1546,7 @@ export default function App() {
                     <h4>Issues</h4>
                     {aiAnalysis.analysis.issues.slice(0, 5).map((issue, index) => (
                       <div key={`${issue.message}-${index}`} className="analysis-item">
-                        <strong>{issue.severity}</strong>
+                        <strong>{issue.severity}{issue.line ? ` (L${issue.line})` : ''}</strong>
                         <span>{issue.message}</span>
                       </div>
                     ))}
@@ -1217,10 +1555,44 @@ export default function App() {
                 {aiAnalysis.analysis.suggestions.length > 0 && (
                   <div className="analysis-list">
                     <h4>Suggestions</h4>
-                    {aiAnalysis.analysis.suggestions.slice(0, 5).map((suggestion, index) => (
-                      <div key={`${suggestion.message}-${index}`} className="analysis-item">
-                        <strong>{suggestion.priority}</strong>
-                        <span>{suggestion.message}</span>
+                    {aiAnalysis.analysis.suggestions.map((suggestion, index) => (
+                      <div key={`${suggestion.message}-${index}`} className="suggestion-card">
+                        <div className="suggestion-card__header">
+                          <span className={`suggestion-card__priority is-${suggestion.priority}`}>
+                            {suggestion.priority}
+                          </span>
+                          <span className={`suggestion-card__type`}>{suggestion.type}</span>
+                          {suggestion.line ? (
+                            <span style={{ fontSize: 10, opacity: 0.5 }}>
+                              L{suggestion.line}{suggestion.endLine ? `–${suggestion.endLine}` : ''}
+                            </span>
+                          ) : null}
+                          <strong className="suggestion-card__title">Suggestion {index + 1}: {suggestion.message}</strong>
+                        </div>
+                        {suggestion.description ? (
+                          <p className="suggestion-card__desc">{suggestion.description}</p>
+                        ) : null}
+                        {suggestion.original ? (
+                          <div className="suggestion-card__code-block">
+                            <div className="suggestion-card__code-label is-original">Original{suggestion.line ? ` (Line ${suggestion.line})` : ''}:</div>
+                            <pre className="suggestion-card__code is-original">{suggestion.original}</pre>
+                          </div>
+                        ) : null}
+                        {(suggestion.suggested || suggestion.code) ? (
+                          <div className="suggestion-card__code-block">
+                            <div className="suggestion-card__code-label is-suggested">Suggested:</div>
+                            <pre className="suggestion-card__code is-suggested">{suggestion.suggested || suggestion.code}</pre>
+                          </div>
+                        ) : null}
+                        {(suggestion.suggested || suggestion.code) ? (
+                          <button
+                            className="apply-btn"
+                            onClick={() => applySuggestion(suggestion)}
+                            title={`Replace code in file${suggestion.line ? ` at line ${suggestion.line}` : ''}`}
+                          >
+                            Apply to File{suggestion.line ? ` (L${suggestion.line})` : ''}
+                          </button>
+                        ) : null}
                       </div>
                     ))}
                   </div>
@@ -1330,10 +1702,18 @@ export default function App() {
       )}
 
       {statusMessage && (
-        <div className={`status-banner is-${statusMessage.level}`}>{statusMessage.message}</div>
+        <div className={`status-banner is-${statusMessage.level}`}>
+          {statusMessage.message}
+          <button className="banner-close" onClick={() => setStatusMessage(null)} title="Dismiss">x</button>
+        </div>
       )}
 
-      {error && <div className="error-banner">{error}</div>}
+      {error && (
+        <div className="error-banner">
+          {error}
+          <button className="banner-close" onClick={() => setError(null)} title="Dismiss">x</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1351,6 +1731,138 @@ function CodeSection({ title, code }: { title: string; code?: string }) {
   );
 }
 
+function DetailClassSummaries({ summaries }: { summaries: GraphClassSummary[] }) {
+  return (
+    <div className="detail-sidebar__class-list">
+      {summaries.slice(0, 4).map((summary) => (
+        <div key={`${summary.kind}-${summary.name}`} className="detail-sidebar__class-card">
+          <div className="detail-sidebar__class-title">
+            <em>{summary.name}</em>
+            <span>{summary.kind}</span>
+          </div>
+          {(summary.methodDetails?.length
+            ? summary.methodDetails
+            : summary.methods.map((name) => ({ name, flowsTo: [], flowsFrom: [] }))).map((method) => (
+            <div key={`${summary.name}-${method.name}`} className="detail-sidebar__method-line">
+              <div className="detail-sidebar__method-name">{method.name}()</div>
+              {method.flowsTo?.length ? (
+                <div className="detail-sidebar__method-flows">
+                  {method.flowsTo.slice(0, 4).map((flow) => (
+                    <div key={`${summary.name}-${method.name}-to-${flow}`} className="detail-sidebar__method-flow">
+                      → {flow}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {method.flowsFrom?.length ? (
+                <div className="detail-sidebar__method-flows">
+                  {method.flowsFrom.slice(0, 3).map((flow) => (
+                    <div key={`${summary.name}-${method.name}-from-${flow}`} className="detail-sidebar__method-flow is-inbound">
+                      ← {flow}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface DependencyImpact {
+  focusNodeId: string | null;
+  upstreamNodes: Set<string>;
+  downstreamNodes: Set<string>;
+  upstreamEdges: Set<string>;
+  downstreamEdges: Set<string>;
+}
+
+function emptyDependencyImpact(): DependencyImpact {
+  return {
+    focusNodeId: null,
+    upstreamNodes: new Set<string>(),
+    downstreamNodes: new Set<string>(),
+    upstreamEdges: new Set<string>(),
+    downstreamEdges: new Set<string>(),
+  };
+}
+
+function collectDependencyImpact(
+  selectedNodeId: string | null,
+  rawEdges: GraphEdge[]
+): DependencyImpact {
+  if (!selectedNodeId) {
+    return emptyDependencyImpact();
+  }
+
+  const dependencyEdgeTypes = new Set([
+    'import',
+    'call',
+    'inheritance',
+    'implementation',
+    'reference',
+    'dataFlow',
+    'sqlMapping',
+    'inject',
+  ]);
+  const outgoing = new Map<string, GraphEdge[]>();
+  const incoming = new Map<string, GraphEdge[]>();
+
+  rawEdges.forEach((edge) => {
+    if (!dependencyEdgeTypes.has(edge.type)) {
+      return;
+    }
+
+    const outgoingEdges = outgoing.get(edge.source) || [];
+    outgoingEdges.push(edge);
+    outgoing.set(edge.source, outgoingEdges);
+
+    const incomingEdges = incoming.get(edge.target) || [];
+    incomingEdges.push(edge);
+    incoming.set(edge.target, incomingEdges);
+  });
+
+  const impact: DependencyImpact = {
+    focusNodeId: selectedNodeId,
+    upstreamNodes: new Set<string>(),
+    downstreamNodes: new Set<string>(),
+    upstreamEdges: new Set<string>(),
+    downstreamEdges: new Set<string>(),
+  };
+
+  const downstreamQueue = [selectedNodeId];
+  const downstreamVisited = new Set<string>([selectedNodeId]);
+  while (downstreamQueue.length > 0) {
+    const current = downstreamQueue.shift()!;
+    for (const edge of outgoing.get(current) || []) {
+      impact.downstreamEdges.add(edge.id);
+      if (!downstreamVisited.has(edge.target)) {
+        downstreamVisited.add(edge.target);
+        impact.downstreamNodes.add(edge.target);
+        downstreamQueue.push(edge.target);
+      }
+    }
+  }
+
+  const upstreamQueue = [selectedNodeId];
+  const upstreamVisited = new Set<string>([selectedNodeId]);
+  while (upstreamQueue.length > 0) {
+    const current = upstreamQueue.shift()!;
+    for (const edge of incoming.get(current) || []) {
+      impact.upstreamEdges.add(edge.id);
+      if (!upstreamVisited.has(edge.source)) {
+        upstreamVisited.add(edge.source);
+        impact.upstreamNodes.add(edge.source);
+        upstreamQueue.push(edge.source);
+      }
+    }
+  }
+
+  return impact;
+}
+
 function buildRenderableGraph(
   rawNodes: GraphNode[],
   rawEdges: GraphEdge[],
@@ -1358,7 +1870,9 @@ function buildRenderableGraph(
   searchQuery: string,
   layout: GraphLayoutAlgorithm,
   mappingFocusNodeId: string | null,
-  affectedNodeIds: string[]
+  affectedNodeIds: string[],
+  dependencyImpact: DependencyImpact,
+  overlayMode: HeatOverlayMode
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const nodeMap = new Map(rawNodes.map((node) => [node.id, node]));
   const loweredQuery = searchQuery.trim().toLowerCase();
@@ -1375,6 +1889,7 @@ function buildRenderableGraph(
   );
   const affectedSet = new Set(affectedNodeIds);
   const mappingSet = collectMappingFocusIds(mappingFocusNodeId, rawEdges);
+  const hasImpact = dependencyImpact.focusNodeId !== null;
 
   const visibleNodes = rawNodes.filter((node) => {
     if (!matchesNodeVisibility(node.type, visibility)) {
@@ -1393,12 +1908,30 @@ function buildRenderableGraph(
     id: node.id,
     type: node.type,
     position: node.position,
-    data: node.data,
+    data: {
+      ...node.data,
+      overlayMode,
+      heatRank:
+        overlayMode === 'complexity'
+          ? Number(node.data.complexityRank || 0)
+          : overlayMode === 'hotspot'
+            ? Number(node.data.hotspotRank || 0)
+            : 0,
+      impactRole:
+        mappingSet.size > 0 ? undefined : resolveNodeImpactRole(node.id, dependencyImpact),
+    },
     draggable: true,
     selectable: true,
     style: {
       ...node.style,
-      opacity: resolveNodeOpacity(node.id, matchedIds, loweredQuery, mappingSet, affectedSet),
+      opacity: resolveNodeOpacity(
+        node.id,
+        matchedIds,
+        loweredQuery,
+        mappingSet,
+        affectedSet,
+        dependencyImpact
+      ),
     },
   }));
 
@@ -1407,8 +1940,9 @@ function buildRenderableGraph(
     .filter((edge) => matchesEdgeVisibility(edge.type, visibility))
     .map<FlowEdge>((edge) => {
       const highlight =
-        edgeIsHighlighted(edge, loweredQuery, matchedIds, mappingSet, affectedSet);
-      const color = edgeColor(edge.type);
+        edgeIsHighlighted(edge, loweredQuery, matchedIds, mappingSet, affectedSet, dependencyImpact);
+      const impactRole = mappingSet.size > 0 ? undefined : resolveEdgeImpactRole(edge, dependencyImpact);
+      const color = edgeColor(edge.type, impactRole);
 
       return {
         id: edge.id,
@@ -1420,7 +1954,9 @@ function buildRenderableGraph(
         style: {
           stroke: color,
           strokeWidth:
-            edge.type === 'contains'
+            impactRole
+              ? 3.6
+              : edge.type === 'contains'
               ? 1.4
               : edge.type === 'dataFlow' || edge.type === 'call'
                 ? 2.6
@@ -1431,7 +1967,7 @@ function buildRenderableGraph(
                     : 2.2,
           opacity: highlight
             ? 1
-            : loweredQuery || mappingSet.size > 0 || affectedSet.size > 0
+            : loweredQuery || mappingSet.size > 0 || affectedSet.size > 0 || hasImpact
               ? 0.14
               : edge.type === 'contains'
                 ? 0.36
@@ -1495,7 +2031,7 @@ function matchesEdgeVisibility(
     return visibility.testFlow;
   }
 
-  if (type === 'dataFlow') {
+  if (type === 'dataFlow' || type === 'sqlMapping' || type === 'inject') {
     return visibility.dataFlow;
   }
 
@@ -1523,7 +2059,18 @@ function isHiddenByCollapsedAncestor(
   return false;
 }
 
-function edgeColor(type: GraphEdge['type']): string {
+function edgeColor(
+  type: GraphEdge['type'],
+  impactRole?: 'upstream' | 'downstream'
+): string {
+  if (impactRole === 'upstream') {
+    return '#f06a5f';
+  }
+
+  if (impactRole === 'downstream') {
+    return '#4dd7d1';
+  }
+
   switch (type) {
     case 'contains':
       return '#f7ba3d';
@@ -1539,12 +2086,25 @@ function edgeColor(type: GraphEdge['type']): string {
       return '#b6f05f';
     case 'dataFlow':
       return '#f6d365';
+    case 'sqlMapping':
+      return '#39d2c0';
+    case 'inject':
+      return '#f778ba';
     default:
       return '#b8d2ea';
   }
 }
 
-function nodeColor(type: GraphNodeType): string {
+function nodeColor(
+  type: GraphNodeType,
+  overlayMode: HeatOverlayMode = 'none',
+  complexityRank = 0,
+  hotspotRank = 0
+): string {
+  if (overlayMode !== 'none') {
+    return heatColorForRank(overlayMode === 'complexity' ? complexityRank : hotspotRank);
+  }
+
   switch (type) {
     case 'folder':
       return '#f7ba3d';
@@ -1568,6 +2128,36 @@ function nodeColor(type: GraphNodeType): string {
   }
 }
 
+function heatColorForRank(rank: number): string {
+  const clamped = Math.max(0, Math.min(1, rank));
+  if (clamped <= 0.5) {
+    const progress = clamped / 0.5;
+    return mixHex('#58d68d', '#f6d365', progress);
+  }
+
+  const progress = (clamped - 0.5) / 0.5;
+  return mixHex('#f6d365', '#f06a5f', progress);
+}
+
+function mixHex(start: string, end: string, amount: number): string {
+  const clamp = Math.max(0, Math.min(1, amount));
+  const startRgb = hexToRgb(start);
+  const endRgb = hexToRgb(end);
+  const mixed = startRgb.map((value, index) =>
+    Math.round(value + (endRgb[index] - value) * clamp)
+  );
+  return `rgb(${mixed[0]}, ${mixed[1]}, ${mixed[2]})`;
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const normalized = hex.replace('#', '');
+  return [
+    parseInt(normalized.slice(0, 2), 16),
+    parseInt(normalized.slice(2, 4), 16),
+    parseInt(normalized.slice(4, 6), 16),
+  ];
+}
+
 function collectMappingFocusIds(
   mappingFocusNodeId: string | null,
   rawEdges: GraphEdge[]
@@ -1577,13 +2167,20 @@ function collectMappingFocusIds(
     return focusIds;
   }
 
+  // Collect all connected nodes through ANY edge type (not just dataFlow)
+  // This enables "click node → see ALL mappings across classes"
+  const mappingEdgeTypes = new Set([
+    'dataFlow', 'call', 'inheritance', 'implementation',
+    'sqlMapping', 'inject', 'testFlow', 'reference',
+  ]);
+
   focusIds.add(mappingFocusNodeId);
   const queue = [mappingFocusNodeId];
 
   while (queue.length > 0) {
     const current = queue.shift()!;
     for (const edge of rawEdges) {
-      if (edge.type !== 'dataFlow') {
+      if (!mappingEdgeTypes.has(edge.type)) {
         continue;
       }
 
@@ -1607,7 +2204,8 @@ function resolveNodeOpacity(
   matchedIds: Set<string>,
   loweredQuery: string,
   mappingSet: Set<string>,
-  affectedSet: Set<string>
+  affectedSet: Set<string>,
+  dependencyImpact: DependencyImpact
 ): number {
   let opacity = 1;
 
@@ -1623,6 +2221,14 @@ function resolveNodeOpacity(
     opacity = affectedSet.has(nodeId) ? 1 : Math.min(opacity, 0.32);
   }
 
+  if (dependencyImpact.focusNodeId) {
+    const inImpact =
+      nodeId === dependencyImpact.focusNodeId ||
+      dependencyImpact.upstreamNodes.has(nodeId) ||
+      dependencyImpact.downstreamNodes.has(nodeId);
+    opacity = inImpact ? 1 : Math.min(opacity, 0.2);
+  }
+
   return opacity;
 }
 
@@ -1631,10 +2237,18 @@ function edgeIsHighlighted(
   loweredQuery: string,
   matchedIds: Set<string>,
   mappingSet: Set<string>,
-  affectedSet: Set<string>
+  affectedSet: Set<string>,
+  dependencyImpact: DependencyImpact
 ): boolean {
   if (mappingSet.size > 0) {
     return mappingSet.has(edge.source) && mappingSet.has(edge.target);
+  }
+
+  if (dependencyImpact.focusNodeId) {
+    return (
+      dependencyImpact.upstreamEdges.has(edge.id) ||
+      dependencyImpact.downstreamEdges.has(edge.id)
+    );
   }
 
   if (affectedSet.size > 0) {
@@ -1642,6 +2256,55 @@ function edgeIsHighlighted(
   }
 
   return !loweredQuery || matchedIds.has(edge.source) || matchedIds.has(edge.target);
+}
+
+function resolveNodeImpactRole(
+  nodeId: string,
+  dependencyImpact: DependencyImpact
+): 'selected' | 'upstream' | 'downstream' | 'both' | undefined {
+  if (!dependencyImpact.focusNodeId) {
+    return undefined;
+  }
+
+  if (nodeId === dependencyImpact.focusNodeId) {
+    return 'selected';
+  }
+
+  const isUpstream = dependencyImpact.upstreamNodes.has(nodeId);
+  const isDownstream = dependencyImpact.downstreamNodes.has(nodeId);
+
+  if (isUpstream && isDownstream) {
+    return 'both';
+  }
+
+  if (isUpstream) {
+    return 'upstream';
+  }
+
+  if (isDownstream) {
+    return 'downstream';
+  }
+
+  return undefined;
+}
+
+function resolveEdgeImpactRole(
+  edge: GraphEdge,
+  dependencyImpact: DependencyImpact
+): 'upstream' | 'downstream' | undefined {
+  if (!dependencyImpact.focusNodeId) {
+    return undefined;
+  }
+
+  if (dependencyImpact.upstreamEdges.has(edge.id)) {
+    return 'upstream';
+  }
+
+  if (dependencyImpact.downstreamEdges.has(edge.id)) {
+    return 'downstream';
+  }
+
+  return undefined;
 }
 
 function resolveMappingNode(selectedNode: GraphNode, rawNodes: GraphNode[]): GraphNode | null {

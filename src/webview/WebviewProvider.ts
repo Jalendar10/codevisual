@@ -12,13 +12,16 @@ import {
   WebviewMessage,
 } from '../types';
 
-export class CodeFlowWebviewProvider {
+export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
   static readonly viewType = 'codeflow.visualizer';
 
   private panel: vscode.WebviewPanel | undefined;
-  private disposables: vscode.Disposable[] = [];
+  private panelDisposables: vscode.Disposable[] = [];
   private queue: WebviewMessage[] = [];
   private ready = false;
+  private lastGraph: GraphData | undefined;
+  /** The analyzed path, so we can refresh and re-analyze after deserialize. */
+  private lastAnalyzedPath: string | undefined;
 
   private readonly openLocationEmitter = new vscode.EventEmitter<{
     filePath: string;
@@ -37,6 +40,12 @@ export class CodeFlowWebviewProvider {
   private readonly gitDataEmitter = new vscode.EventEmitter<void>();
   private readonly gitAnalysisEmitter = new vscode.EventEmitter<void>();
   private readonly gitSettingsEmitter = new vscode.EventEmitter<GitWebhookSettings>();
+  private readonly refreshEmitter = new vscode.EventEmitter<void>();
+  private readonly requestModelsEmitter = new vscode.EventEmitter<void>();
+  private readonly selectModelEmitter = new vscode.EventEmitter<{ modelId: string }>();
+  private readonly testDiffEmitter = new vscode.EventEmitter<{ nodeId?: string }>();
+  private readonly applySuggestionEmitter = new vscode.EventEmitter<{ filePath: string; line: number; endLine?: number; original: string; suggested: string }>();
+  private readonly runTestsForFileEmitter = new vscode.EventEmitter<{ filePath: string }>();
 
   readonly onDidRequestOpenLocation = this.openLocationEmitter.event;
   readonly onDidRequestExport = this.exportEmitter.event;
@@ -47,8 +56,56 @@ export class CodeFlowWebviewProvider {
   readonly onDidRequestGitData = this.gitDataEmitter.event;
   readonly onDidRequestGitAnalysis = this.gitAnalysisEmitter.event;
   readonly onDidSaveGitSettings = this.gitSettingsEmitter.event;
+  readonly onDidRequestRefresh = this.refreshEmitter.event;
+  readonly onDidRequestModels = this.requestModelsEmitter.event;
+  readonly onDidSelectModel = this.selectModelEmitter.event;
+  readonly onDidRequestTestDiff = this.testDiffEmitter.event;
+  readonly onDidApplySuggestion = this.applySuggestionEmitter.event;
+  readonly onDidRunTestsForFile = this.runTestsForFileEmitter.event;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(private readonly extensionUri: vscode.Uri) {
+    // Register the serializer so the webview restores when dragged to another
+    // editor group or when VS Code restarts — fixes the blank panel bug.
+    vscode.window.registerWebviewPanelSerializer(CodeFlowWebviewProvider.viewType, this);
+  }
+
+  /** Store the last analyzed path so we can restore on deserialize. */
+  setAnalyzedPath(p: string): void {
+    this.lastAnalyzedPath = p;
+  }
+
+  getAnalyzedPath(): string | undefined {
+    return this.lastAnalyzedPath;
+  }
+
+  /**
+   * Called by VS Code when restoring a previously persisted webview panel
+   * (e.g. after dragging to a second window or restarting VS Code).
+   */
+  async deserializeWebviewPanel(panel: vscode.WebviewPanel, _state: unknown): Promise<void> {
+    // Dispose any previous panel listeners (in case of rapid re-serialization).
+    // Important: dispose BEFORE reassigning this.panel so the old onDidDispose
+    // callback (which clears this.panel) is removed before it can fire.
+    this.disposePanel();
+
+    this.panel = panel;
+    this.ready = false;
+    this.queue = [];
+
+    panel.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'dist', 'webview')],
+    };
+
+    panel.webview.html = this.renderHtml(panel.webview);
+    this.wirePanel(panel);
+
+    // Re-send the last graph so the restored panel isn't blank.
+    // The message is queued until the webview fires 'ready'.
+    if (this.lastGraph) {
+      this.post({ type: 'updateGraph', data: this.lastGraph });
+    }
+  }
 
   show(): void {
     if (this.panel) {
@@ -70,31 +127,47 @@ export class CodeFlowWebviewProvider {
     );
 
     this.panel.webview.html = this.renderHtml(this.panel.webview);
+    this.wirePanel(this.panel);
+  }
 
-    this.panel.webview.onDidReceiveMessage(
+  /** Common wiring for both show() and deserializeWebviewPanel(). */
+  private wirePanel(panel: vscode.WebviewPanel): void {
+    // Capture a reference so the dispose handler only clears state if
+    // the disposed panel is still the current one.  When a panel is dragged
+    // to another window VS Code disposes the old panel and calls
+    // deserializeWebviewPanel() with a new one — without this guard the
+    // old panel's onDidDispose would null out the freshly assigned panel.
+    const panelRef = panel;
+
+    panel.webview.onDidReceiveMessage(
       (message: ExtensionMessage) => this.handleMessage(message),
       undefined,
-      this.disposables
+      this.panelDisposables
     );
 
-    this.panel.onDidDispose(
+    panel.onDidDispose(
       () => {
-        this.panel = undefined;
-        this.ready = false;
-        this.queue = [];
-        this.disposables.forEach((disposable) => disposable.dispose());
-        this.disposables = [];
+        if (this.panel === panelRef) {
+          this.panel = undefined;
+          this.ready = false;
+          this.queue = [];
+        }
+        this.disposePanel();
       },
       undefined,
-      this.disposables
+      this.panelDisposables
     );
   }
 
   updateGraph(graph: GraphData): void {
+    this.lastGraph = graph;
+    if (graph.metadata.path) {
+      this.lastAnalyzedPath = graph.metadata.path;
+    }
     this.post({ type: 'updateGraph', data: graph });
   }
 
-  updateAiStatus(status: { available: boolean; provider: string; message: string }): void {
+  updateAiStatus(status: { available: boolean; provider: string; message: string; model?: string }): void {
     this.post({ type: 'aiStatus', ...status });
   }
 
@@ -126,12 +199,26 @@ export class CodeFlowWebviewProvider {
     this.post({ type: 'gitData', commits, settings, review });
   }
 
+  showModels(models: Array<{ id: string; family: string }>): void {
+    this.post({ type: 'aiModels', models });
+  }
+
+  showTestDiffResult(targetLabel: string, missingScenarios: string, testFilePath?: string, sourceFilePath?: string): void {
+    this.post({ type: 'testDiffResult', targetLabel, missingScenarios, testFilePath, sourceFilePath });
+  }
+
   showError(message: string): void {
     this.post({ type: 'error', message });
   }
 
+  private disposePanel(): void {
+    this.panelDisposables.forEach((d) => d.dispose());
+    this.panelDisposables = [];
+  }
+
   dispose(): void {
     this.panel?.dispose();
+    this.disposePanel();
     this.openLocationEmitter.dispose();
     this.exportEmitter.dispose();
     this.aiAnalysisEmitter.dispose();
@@ -141,6 +228,12 @@ export class CodeFlowWebviewProvider {
     this.gitDataEmitter.dispose();
     this.gitAnalysisEmitter.dispose();
     this.gitSettingsEmitter.dispose();
+    this.refreshEmitter.dispose();
+    this.requestModelsEmitter.dispose();
+    this.selectModelEmitter.dispose();
+    this.testDiffEmitter.dispose();
+    this.applySuggestionEmitter.dispose();
+    this.runTestsForFileEmitter.dispose();
   }
 
   private handleMessage(message: ExtensionMessage): void {
@@ -180,6 +273,24 @@ export class CodeFlowWebviewProvider {
         break;
       case 'saveGitSettings':
         this.gitSettingsEmitter.fire(message.data);
+        break;
+      case 'requestRefresh':
+        this.refreshEmitter.fire();
+        break;
+      case 'requestModels':
+        this.requestModelsEmitter.fire();
+        break;
+      case 'selectModel':
+        this.selectModelEmitter.fire({ modelId: (message as any).modelId });
+        break;
+      case 'requestTestDiff':
+        this.testDiffEmitter.fire({ nodeId: (message as any).nodeId });
+        break;
+      case 'applySuggestion':
+        this.applySuggestionEmitter.fire(message as any);
+        break;
+      case 'runTestsForFile':
+        this.runTestsForFileEmitter.fire({ filePath: (message as any).filePath });
         break;
     }
   }

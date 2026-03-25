@@ -4,6 +4,59 @@ import { GraphLayoutAlgorithm } from '../../../types';
 
 const DEFAULT_SIZE = { width: 380, height: 220 };
 
+// Estimate node height based on content — auto-adjust for class/method count
+function estimateNodeHeight(node: Node): number {
+  const data = node.data as Record<string, unknown>;
+  let height = 80; // base header + footer
+
+  // Methods contribute to height
+  const methodCount = (data.methodCount as number) || 0;
+  height += methodCount * 18;
+
+  // Class summaries contribute
+  const classSummaries = data.classSummaries as Array<{ methods: string[]; fields?: string[]; sqlQueries?: string[] }> | undefined;
+  if (classSummaries?.length) {
+    for (const cls of classSummaries) {
+      height += 32; // class header
+      height += (cls.methods?.length || 0) * 18;
+      height += (cls.fields?.length || 0) * 14;
+      height += (cls.sqlQueries?.length || 0) * 16;
+    }
+  }
+
+  // Data mappings contribute
+  const dataMappings = data.dataMappings as unknown[] | undefined;
+  if (dataMappings?.length) {
+    height += 24 + Math.min(dataMappings.length, 8) * 18;
+  }
+
+  // Metric grid
+  if (data.lineCount || data.byteSize) {
+    height += 40;
+  }
+
+  return Math.max(DEFAULT_SIZE.height, height);
+}
+
+// Estimate node width based on label length and content
+function estimateNodeWidth(node: Node): number {
+  const data = node.data as Record<string, unknown>;
+  const label = (data.label as string) || '';
+  let width = Math.max(280, label.length * 9 + 60);
+
+  const classSummaries = data.classSummaries as Array<{ name: string; methods: string[] }> | undefined;
+  if (classSummaries?.length) {
+    for (const cls of classSummaries) {
+      width = Math.max(width, cls.name.length * 9 + 80);
+      for (const m of cls.methods) {
+        width = Math.max(width, m.length * 7 + 80);
+      }
+    }
+  }
+
+  return Math.min(width, 500); // cap at 500
+}
+
 export function applyLayout<T extends Record<string, unknown>>(
   nodes: Node<T>[],
   edges: Edge[],
@@ -44,17 +97,8 @@ function applyDagreLayout<T extends Record<string, unknown>>(
   });
 
   nodes.forEach((node) => {
-    const rawWidth =
-      typeof node.style?.width === 'number' ? node.style.width : DEFAULT_SIZE.width;
-    const width = rawWidth + 60;  // extra padding for rendered node
-    const rawHeight =
-      typeof node.style?.minHeight === 'number'
-        ? node.style.minHeight
-        : typeof node.style?.height === 'number'
-          ? node.style.height
-          : DEFAULT_SIZE.height;
-    const height = rawHeight + 80; // extra padding — actual rendered height often exceeds estimate
-
+    const width = estimateNodeWidth(node) + 40;
+    const height = estimateNodeHeight(node) + 40;
     graph.setNode(node.id, { width, height });
   });
 
@@ -133,6 +177,18 @@ function applyRadialLayout<T extends Record<string, unknown>>(nodes: Node<T>[], 
 function applyForceLayout<T extends Record<string, unknown>>(nodes: Node<T>[], edges: Edge[]): Node<T>[] {
   const state = new Map<string, { x: number; y: number; vx: number; vy: number }>();
 
+  // Build adjacency for faster edge lookup
+  const adjOut = new Map<string, string[]>();
+  const adjIn = new Map<string, string[]>();
+  for (const edge of edges) {
+    const out = adjOut.get(edge.source) || [];
+    out.push(edge.target);
+    adjOut.set(edge.source, out);
+    const inp = adjIn.get(edge.target) || [];
+    inp.push(edge.source);
+    adjIn.set(edge.target, inp);
+  }
+
   nodes.forEach((node, index) => {
     const angle = (index / Math.max(nodes.length, 1)) * Math.PI * 2;
     state.set(node.id, {
@@ -143,21 +199,32 @@ function applyForceLayout<T extends Record<string, unknown>>(nodes: Node<T>[], e
     });
   });
 
-  for (let iteration = 0; iteration < 180; iteration += 1) {
-    for (const source of nodes) {
-      const sourceState = state.get(source.id)!;
-      for (const target of nodes) {
-        if (source.id === target.id) {
+  // Fewer iterations for large graphs → faster render
+  const iterations = nodes.length > 100 ? 80 : nodes.length > 50 ? 120 : 180;
+
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    // Use Barnes-Hut-like optimization for large graphs: skip distant pairs
+    for (let i = 0; i < nodes.length; i++) {
+      const sourceState = state.get(nodes[i].id)!;
+      for (let j = i + 1; j < nodes.length; j++) {
+        const targetState = state.get(nodes[j].id)!;
+        const dx = sourceState.x - targetState.x;
+        const dy = sourceState.y - targetState.y;
+        const distSq = dx * dx + dy * dy;
+        const distance = Math.max(1, Math.sqrt(distSq));
+
+        // Skip very distant pairs for perf
+        if (distance > 2000 && nodes.length > 60) {
           continue;
         }
 
-        const targetState = state.get(target.id)!;
-        const dx = sourceState.x - targetState.x;
-        const dy = sourceState.y - targetState.y;
-        const distance = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-        const repulsion = 18000 / (distance * distance);
-        sourceState.vx += (dx / distance) * repulsion;
-        sourceState.vy += (dy / distance) * repulsion;
+        const repulsion = 18000 / distSq;
+        const fx = (dx / distance) * repulsion;
+        const fy = (dy / distance) * repulsion;
+        sourceState.vx += fx;
+        sourceState.vy += fy;
+        targetState.vx -= fx;
+        targetState.vy -= fy;
       }
     }
 

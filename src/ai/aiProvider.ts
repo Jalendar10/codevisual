@@ -236,17 +236,9 @@ export class CopilotProvider implements IAIProvider {
     );
   }
 
-  /** Pick the best available Copilot model (prefer gpt-4o family). */
+  /** Pick the best available Copilot model, respecting user's setting. */
   private async selectModel(): Promise<vscode.LanguageModelChat> {
-    let all: vscode.LanguageModelChat[] = [];
-    try {
-      all = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-    } catch (err) {
-      throw new Error(
-        `Could not access GitHub Copilot models: ${err instanceof Error ? err.message : String(err)}. ` +
-        'Make sure GitHub Copilot Chat is installed, you are signed in, and have accepted the permission request.'
-      );
-    }
+    const all = await this.listAvailableModels();
     if (all.length === 0) {
       throw new Error(
         'No Copilot models are available right now. ' +
@@ -254,8 +246,40 @@ export class CopilotProvider implements IAIProvider {
         'If this is the first use, VS Code may have shown a permission prompt — please accept it and retry.'
       );
     }
+
+    // Respect user model preference from settings
+    const config = vscode.workspace.getConfiguration('codeflow');
+    const preferred = config.get<string>('ai.model', 'auto');
+    if (preferred && preferred !== 'auto' && preferred !== 'copilot-default') {
+      // Try exact match first, then partial match
+      const exact = all.find(
+        (m) => m.id === preferred || m.family === preferred
+      );
+      if (exact) {
+        return exact;
+      }
+      const partial = all.find(
+        (m) => m.id?.includes(preferred) || m.family?.includes(preferred)
+      );
+      if (partial) {
+        return partial;
+      }
+    }
+
     // Prefer a GPT-4 class model; fall back to whatever is available
     return all.find((m) => m.family?.includes('gpt-4') || m.id?.includes('gpt-4')) ?? all[0];
+  }
+
+  /** List all available Copilot models — exposed so the extension can show a picker. */
+  async listAvailableModels(): Promise<vscode.LanguageModelChat[]> {
+    try {
+      return await vscode.lm.selectChatModels({ vendor: 'copilot' });
+    } catch (err) {
+      throw new Error(
+        `Could not access GitHub Copilot models: ${err instanceof Error ? err.message : String(err)}. ` +
+        'Make sure GitHub Copilot Chat is installed, you are signed in, and have accepted the permission request.'
+      );
+    }
   }
 
   private async sendPrompt(prompt: string): Promise<string> {
@@ -285,6 +309,11 @@ export class CopilotProvider implements IAIProvider {
           suggestions: (result.suggestions || []).map((s: any) => ({
             type: s.type || 'refactor',
             message: s.message,
+            description: s.description || s.message,
+            line: typeof s.line === 'number' ? s.line : undefined,
+            endLine: typeof s.endLine === 'number' ? s.endLine : undefined,
+            original: s.original || '',
+            suggested: s.suggested || s.code || '',
             priority: s.priority || 'medium',
             code: s.code,
           })),
@@ -316,15 +345,34 @@ export class CopilotProvider implements IAIProvider {
     const model = await this.selectModel();
     const prompt = `You are an expert code reviewer. Analyze the following ${context.language || 'code'} file${context.filePath ? ` (${context.filePath})` : ''} and respond with ONLY a JSON object — no markdown, no explanation, just JSON.
 
+IMPORTANT: For each suggestion, provide the ORIGINAL code snippet and the SUGGESTED replacement, plus a description of WHY the change is recommended. This is critical for the UI to show a before/after diff.
+
 JSON structure:
 {
-  "summary": "brief overview",
+  "summary": "brief overview of the code — what it does, its architecture, and overall quality",
   "issues": [{"severity": "error|warning|info", "message": "description", "line": number, "suggestion": "fix"}],
-  "suggestions": [{"type": "refactor|performance|security|test|documentation", "message": "description", "priority": "high|medium|low", "code": "optional snippet"}],
+  "suggestions": [
+    {
+      "type": "refactor|performance|security|test|documentation|style",
+      "message": "short title of the suggestion",
+      "description": "detailed explanation of WHY this change is recommended and how it improves the code",
+      "line": <line number where the original code starts>,
+      "endLine": <line number where the original code ends>,
+      "original": "the original code snippet as-is from the source",
+      "suggested": "the improved replacement code",
+      "priority": "high|medium|low"
+    }
+  ],
   "codeQuality": <number 0-100>,
-  "testCoverage": "description",
+  "testCoverage": "description of test coverage gaps and recommendations",
   "securityConcerns": ["concern1"]
 }
+
+CRITICAL: Every suggestion MUST include "line" and "endLine" — the exact line numbers from the source code where the original snippet lives. This lets the user apply the fix directly.
+
+Provide at least 5 deep, actionable suggestions with original/suggested code pairs. Analyze: architecture, SOLID principles, error handling, naming, SQL injection, performance bottlenecks, test coverage gaps, and data flow correctness.
+
+${context.instructions || ''}
 
 Code:
 \`\`\`${context.language || ''}
@@ -381,6 +429,11 @@ ${diff.slice(0, 12000)}
  */
 export class AIProviderManager {
   private copilot = new CopilotProvider();
+
+  /** Expose the copilot provider for direct model listing. */
+  getCopilotProvider(): CopilotProvider {
+    return this.copilot;
+  }
   
   async getCopilotStatus(): Promise<{ available: boolean; provider: string; message: string }> {
     const available = await this.copilot.isAvailable();

@@ -1,4 +1,5 @@
 import { Handle, NodeProps, Position } from '@xyflow/react';
+import type { CSSProperties } from 'react';
 import {
   DataFlowMapping,
   GraphClassSummary,
@@ -7,11 +8,12 @@ import {
   PackageReference,
 } from '../../../types';
 
+type ImpactRole = 'selected' | 'upstream' | 'downstream' | 'both';
+
 function shortPath(fullPath?: string): string {
   if (!fullPath) {
     return '';
   }
-  // Show only last 2 segments: parent/filename
   const parts = fullPath.replace(/\\/g, '/').split('/').filter(Boolean);
   return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : parts.join('/');
 }
@@ -61,8 +63,9 @@ function renderMemberPreview(data: GraphNodeData) {
 }
 
 function renderClassSummary(summary: GraphClassSummary, isLast: boolean) {
-  const shown = summary.methods.slice(0, 8);
-  const extra = summary.methods.length - shown.length;
+  const shown = summary.methodDetails?.length
+    ? summary.methodDetails
+    : summary.methods.map((name) => ({ name, flowsTo: [], flowsFrom: [] }));
   return (
     <div key={`${summary.kind}-${summary.name}`} className="cf-node__class-block">
       {/* Class header row */}
@@ -72,30 +75,84 @@ function renderClassSummary(summary: GraphClassSummary, isLast: boolean) {
         {summary.lineCount ? <em className="cf-node__class-lines">{summary.lineCount}L</em> : null}
         {summary.tests?.length ? <span className="cf-node__class-tests-badge">✓{summary.tests.length}</span> : null}
       </div>
+      {/* Extends / Implements info */}
+      {(summary.extends || summary.implements?.length) ? (
+        <div className="cf-node__class-meta">
+          {summary.extends ? <span className="cf-node__extends">extends {summary.extends}</span> : null}
+          {summary.implements?.length ? (
+            <span className="cf-node__implements">impl {summary.implements.join(', ')}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {/* Fields */}
+      {summary.fields?.length ? (
+        <div className="cf-node__field-list">
+          {summary.fields.slice(0, 6).map((field, idx) => (
+            <div key={`${summary.name}-field-${idx}`} className="cf-node__field-row">
+              <span className="cf-node__field-icon">◆</span>
+              <span className="cf-node__field-name">{field}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {/* Method tree with vertical connector */}
       {shown.length > 0 ? (
         <div className="cf-node__method-tree">
           {shown.map((method, idx) => {
-            const isLastMethod = idx === shown.length - 1 && extra === 0;
+            const isLastMethod = idx === shown.length - 1;
             return (
-              <div key={`${summary.name}-${method}-${idx}`} className="cf-node__method-row">
-                <span className={`cf-node__tree-branch ${isLastMethod ? 'is-last' : ''}`}>
-                  {isLastMethod ? '└─' : '├─'}
-                </span>
-                <span className="cf-node__method-name">{method}()</span>
+              <div key={`${summary.name}-${method.name}-${idx}`} className="cf-node__method-block">
+                <div className="cf-node__method-row">
+                  <span className={`cf-node__tree-branch ${isLastMethod ? 'is-last' : ''}`}>
+                    {isLastMethod ? '└─' : '├─'}
+                  </span>
+                  <span className="cf-node__method-name">{method.name}()</span>
+                </div>
+                {method.flowsTo?.length ? (
+                  <div className="cf-node__method-flows">
+                    {method.flowsTo.slice(0, 3).map((flow) => (
+                      <div key={`${summary.name}-${method.name}-to-${flow}`} className="cf-node__method-flow">
+                        <span className="cf-node__method-flow-arrow">→</span>
+                        <span className="cf-node__method-flow-text">{flow}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {method.flowsFrom?.length ? (
+                  <div className="cf-node__method-flows">
+                    {method.flowsFrom.slice(0, 2).map((flow) => (
+                      <div key={`${summary.name}-${method.name}-from-${flow}`} className="cf-node__method-flow is-inbound">
+                        <span className="cf-node__method-flow-arrow">←</span>
+                        <span className="cf-node__method-flow-text">{flow}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             );
           })}
-          {extra > 0 ? (
-            <div className="cf-node__method-row">
-              <span className="cf-node__tree-branch is-last">└─</span>
-              <span className="cf-node__method-name is-muted">+{extra} more</span>
-            </div>
-          ) : null}
         </div>
       ) : (
         <div className="cf-node__method-empty">no methods</div>
       )}
+      {/* SQL queries attached to this class */}
+      {summary.sqlQueries?.length ? (
+        <div className="cf-node__sql-list">
+          {summary.sqlQueries.slice(0, 3).map((sql, idx) => (
+            <div key={`${summary.name}-sql-${idx}`} className="cf-node__sql-row">
+              <span className="cf-node__sql-icon">⚡</span>
+              <span className="cf-node__sql-text" title={sql}>
+                {sql.length > 60 ? sql.substring(0, 60) + '…' : sql}
+              </span>
+            </div>
+          ))}
+          {summary.sqlQueries.length > 3 ? (
+            <div className="cf-node__sql-row cf-node__sql-more">
+              +{summary.sqlQueries.length - 3} more queries
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {!isLast && <div className="cf-node__class-divider" />}
     </div>
   );
@@ -127,18 +184,18 @@ function renderDataMappings(dataMappings?: DataFlowMapping[]) {
     <div className="cf-node__section">
       <div className="cf-node__section-label">Data Flow</div>
       <div className="cf-node__mapping-list">
-        {dataMappings.slice(0, 5).map((mapping, idx) => (
+        {dataMappings.slice(0, 8).map((mapping, idx) => (
           <div
             key={`${mapping.source}-${mapping.target}-${mapping.operation}-${idx}`}
-            className="cf-node__mapping-item"
+            className={`cf-node__mapping-item cf-node__mapping-item--${mapping.confidence || 'medium'}`}
           >
             <span className="cf-node__mapping-source">{mapping.source}</span>
             <span className="cf-node__mapping-arrow">──{mapping.operation ? ` ${mapping.operation} ` : '──'}▶</span>
             <span className="cf-node__mapping-target">{mapping.target}</span>
           </div>
         ))}
-        {dataMappings.length > 5 ? (
-          <div className="cf-node__mapping-more">+{dataMappings.length - 5} more flows</div>
+        {dataMappings.length > 8 ? (
+          <div className="cf-node__mapping-more">+{dataMappings.length - 8} more flows</div>
         ) : null}
       </div>
     </div>
@@ -199,11 +256,91 @@ function renderAiDot(summary?: unknown) {
   return <span className="cf-node__ai-dot" title="AI analysis available" />;
 }
 
+function impactRole(data: GraphNodeData): ImpactRole | undefined {
+  return typeof data.impactRole === 'string' ? (data.impactRole as ImpactRole) : undefined;
+}
+
+function heatRank(data: GraphNodeData): number {
+  return Math.max(0, Math.min(1, Number(data.heatRank || 0)));
+}
+
+function heatColor(rank: number): string {
+  if (rank <= 0.5) {
+    return mixColor('#58d68d', '#f6d365', rank / 0.5);
+  }
+
+  return mixColor('#f6d365', '#f06a5f', (rank - 0.5) / 0.5);
+}
+
+function mixColor(start: string, end: string, amount: number): string {
+  const clamped = Math.max(0, Math.min(1, amount));
+  const startRgb = hexToRgb(start);
+  const endRgb = hexToRgb(end);
+  const mixed = startRgb.map((value, index) =>
+    Math.round(value + (endRgb[index] - value) * clamped)
+  );
+  return `rgb(${mixed[0]}, ${mixed[1]}, ${mixed[2]})`;
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const normalized = hex.replace('#', '');
+  return [
+    parseInt(normalized.slice(0, 2), 16),
+    parseInt(normalized.slice(2, 4), 16),
+    parseInt(normalized.slice(4, 6), 16),
+  ];
+}
+
+function nodeSurfaceStyle(data: GraphNodeData): CSSProperties {
+  const rank = heatRank(data);
+  const overlayMode = typeof data.overlayMode === 'string' ? data.overlayMode : 'none';
+  const role = impactRole(data);
+  const impactColor =
+    role === 'selected'
+      ? 'rgba(255, 255, 255, 0.95)'
+      : role === 'upstream'
+        ? 'rgba(240, 106, 95, 0.94)'
+        : role === 'downstream'
+          ? 'rgba(77, 215, 209, 0.94)'
+          : role === 'both'
+            ? 'rgba(246, 211, 101, 0.94)'
+            : 'rgba(255, 255, 255, 0.14)';
+
+  return {
+    ['--cf-heat-color' as string]:
+      overlayMode !== 'none' && rank > 0 ? heatColor(rank) : 'transparent',
+    ['--cf-heat-alpha' as string]:
+      overlayMode !== 'none' ? `${0.12 + rank * 0.24}` : '0',
+    ['--cf-impact-color' as string]: impactColor,
+  };
+}
+
+function nodeClassName(
+  baseClass: string,
+  data: GraphNodeData,
+  selected: boolean
+): string {
+  const classes = [baseClass];
+  if (selected) {
+    classes.push('is-selected');
+  }
+  if (data.changed) {
+    classes.push('is-changed');
+  }
+  if (impactRole(data)) {
+    classes.push(`is-impact-${impactRole(data)}`);
+  }
+  if (typeof data.overlayMode === 'string' && data.overlayMode !== 'none' && heatRank(data) > 0) {
+    classes.push('is-heated');
+  }
+  return classes.join(' ');
+}
+
 export function FolderNode({ data, selected }: NodeProps) {
   const payload = data as GraphNodeData;
   const isExpanded = payload.expanded !== false;
   return (
-    <div className={`cf-node cf-node-folder ${selected ? 'is-selected' : ''}`}>
+    <div className={nodeClassName('cf-node cf-node-folder', payload, selected)} style={nodeSurfaceStyle(payload)}>
       <Handle type="target" position={Position.Left} className="cf-handle" />
       <div className="cf-node__header">
         <span className="cf-node__toggle">{isExpanded ? '▾' : '▸'}</span>
@@ -224,7 +361,10 @@ export function FolderNode({ data, selected }: NodeProps) {
 export function FileNode({ data, selected }: NodeProps) {
   const payload = data as GraphNodeData;
   return (
-    <div className={`cf-node cf-node-file ${selected ? 'is-selected' : ''}`}>
+    <div
+      className={nodeClassName('cf-node cf-node-file', payload, selected)}
+      style={{ width: 'auto', minWidth: 320, ...nodeSurfaceStyle(payload) }}
+    >
       <Handle type="target" position={Position.Left} className="cf-handle" />
       <div className="cf-node__header">
         <span className="cf-node__glyph">◫</span>
@@ -254,6 +394,14 @@ export function FileNode({ data, selected }: NodeProps) {
           <span>Methods</span>
           <strong>{payload.methodCount || 0}</strong>
         </div>
+        <div>
+          <span>Complexity</span>
+          <strong>{payload.complexity || 0}</strong>
+        </div>
+        <div>
+          <span>Hotspot</span>
+          <strong>{payload.hotspotScore || 0}</strong>
+        </div>
       </div>
       {renderClassSections(payload)}
       {renderMemberPreview(payload)}
@@ -270,7 +418,10 @@ export function FileNode({ data, selected }: NodeProps) {
 export function SymbolNode({ data, selected, type }: NodeProps) {
   const payload = data as GraphNodeData;
   return (
-    <div className={`cf-node cf-node-symbol cf-node-symbol--${type} ${selected ? 'is-selected' : ''}`}>
+    <div
+      className={nodeClassName(`cf-node cf-node-symbol cf-node-symbol--${type}`, payload, selected)}
+      style={{ width: 'auto', minWidth: 260, ...nodeSurfaceStyle(payload) }}
+    >
       <Handle type="target" position={Position.Left} className="cf-handle" />
       <div className="cf-node__header">
         <span className="cf-node__pill">{payload.kind || type}</span>
@@ -287,6 +438,8 @@ export function SymbolNode({ data, selected, type }: NodeProps) {
         {payload.returnType && <span>returns {payload.returnType}</span>}
         {payload.visibility && <span>{payload.visibility}</span>}
         {payload.isAsync && <span>async</span>}
+        {!!payload.complexity && <span>complexity {payload.complexity}</span>}
+        {!!payload.hotspotScore && <span>hotspot {payload.hotspotScore}</span>}
         {(payload.methodCount || 0) > 0 && <span>{payload.methodCount} methods</span>}
         {(payload.testCount || 0) > 0 && <span>{payload.testCount} tests</span>}
       </div>
@@ -302,7 +455,7 @@ export function SymbolNode({ data, selected, type }: NodeProps) {
 export function ModuleNode({ data, selected }: NodeProps) {
   const payload = data as GraphNodeData;
   return (
-    <div className={`cf-node cf-node-module ${selected ? 'is-selected' : ''}`}>
+    <div className={nodeClassName('cf-node cf-node-module', payload, selected)} style={nodeSurfaceStyle(payload)}>
       <Handle type="target" position={Position.Left} className="cf-handle" />
       <div className="cf-node__header">
         <span className="cf-node__glyph">{payload.external ? '⟡' : '⬢'}</span>

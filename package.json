@@ -2,7 +2,7 @@
   "name": "codeflow-visualizer",
   "displayName": "CodeFlow Visualizer",
   "description": "Interactive node-based visualization of code structure inside VS Code.",
-  "version": "1.0.0",
+  "version": "2.5.0",
   "publisher": "codeflow",
   "engines": {
     "vscode": "^1.110.0"
@@ -39,6 +39,18 @@
       {
         "command": "codeflow.visualizeSelection",
         "title": "CodeFlow: Visualize Selection"
+      },
+      {
+        "command": "codeflow.generateTests",
+        "title": "CodeFlow: Generate Test Cases"
+      },
+      {
+        "command": "codeflow.listCopilotModels",
+        "title": "CodeFlow: List Available Copilot Models"
+      },
+      {
+        "command": "codeflow.refreshGraph",
+        "title": "CodeFlow: Refresh Graph"
       }
     ],
     "menus": {
@@ -52,6 +64,11 @@
           "command": "codeflow.visualizeFile",
           "when": "resourceScheme == file && !explorerResourceIsFolder",
           "group": "navigation@2"
+        },
+        {
+          "command": "codeflow.generateTests",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "navigation@3"
         }
       ],
       "editor/context": [
@@ -63,6 +80,10 @@
           "command": "codeflow.visualizeSelection",
           "when": "editorHasSelection",
           "group": "navigation@2"
+        },
+        {
+          "command": "codeflow.generateTests",
+          "group": "navigation@3"
         }
       ]
     },
@@ -117,6 +138,35 @@
             "build"
           ],
           "description": "Folders or glob patterns excluded from folder visualization."
+        },
+        "codeflow.liveRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh folder and file graphs when matching files are saved, created, or deleted."
+        },
+        "codeflow.ai.model": {
+          "type": "string",
+          "default": "auto",
+          "description": "AI model to use for analysis. Set 'auto' to pick the best available model. Or type any model name shown in GitHub Copilot (e.g. gpt-4o, claude-sonnet-4, gemini-2.0-flash, o3-mini). The extension will match it against available Copilot models."
+        },
+        "codeflow.ai.provider": {
+          "type": "string",
+          "default": "copilot",
+          "enum": [
+            "copilot",
+            "openai"
+          ],
+          "description": "AI provider for code analysis. GitHub Copilot requires the Copilot extension. OpenAI requires an API key."
+        },
+        "codeVisual.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key for AI analysis (only used when provider is 'openai')."
+        },
+        "codeVisual.openaiModel": {
+          "type": "string",
+          "default": "gpt-4o",
+          "description": "OpenAI model to use when provider is 'openai'."
         },
         "codeflow.git.provider": {
           "type": "string",

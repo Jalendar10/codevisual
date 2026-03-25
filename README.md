@@ -11,6 +11,9 @@ CodeFlow Visualizer is a VS Code extension that turns folders, files, and code e
 - Visualizes classes, interfaces, functions, methods, types, and variables for a file or selection
 - Adds heuristic inheritance, implementation, call-graph, and test-flow edges
 - Supports pan, zoom, drag, minimap, search, expand/collapse, and layout switching
+- Auto-refreshes file and folder graphs on save/create/delete with live activity flashes
+- Adds complexity and git-hotspot overlays so risky areas stand out immediately
+- Highlights upstream dependents and downstream dependencies when a node is selected
 - Clicks through from graph nodes back to the source file in VS Code
 - Exports the current graph as JSON, SVG, or PNG
 - Includes two webview tabs: `Visual` and `Settings & AI`
@@ -37,6 +40,7 @@ These commands are available from the explorer context menu and editor context m
 - `codeflow.showCallGraph`
 - `codeflow.maxDepth`
 - `codeflow.excludePatterns`
+- `codeflow.liveRefresh`
 
 ## Supported Languages
 
