@@ -2,7 +2,7 @@
   "name": "codeflow-visualizer",
   "displayName": "CodeFlow Visualizer",
   "description": "Interactive node-based visualization of code structure inside VS Code.",
-  "version": "2.5.0",
+  "version": "2.6.3",
   "publisher": "codeflow",
   "engines": {
     "vscode": "^1.110.0"
@@ -195,7 +195,7 @@
     "build": "webpack --mode production",
     "watch": "webpack --mode development --watch",
     "compile": "webpack --mode development",
-    "package": "vsce package"
+    "package": "node scripts/bump-vsix-version.js && vsce package"
   },
   "dependencies": {
     "@xyflow/react": "^12.9.0",

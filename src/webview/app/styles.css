@@ -340,10 +340,40 @@ body {
   margin-bottom: 6px;
 }
 
+.detail-sidebar__method-list {
+  display: grid;
+  gap: 6px;
+}
+
 .detail-sidebar__class-title em {
   color: var(--accent-cyan);
   font-style: normal;
   font-weight: 700;
+}
+
+.detail-sidebar__class-button,
+.detail-sidebar__inspect-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.detail-sidebar__class-button {
+  color: var(--accent-cyan);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.detail-sidebar__inspect-button:hover {
+  color: var(--accent-amber);
+}
+
+.detail-sidebar__inspect-button.is-active {
+  color: var(--accent-amber);
 }
 
 .detail-sidebar__class-title span {
@@ -581,6 +611,12 @@ body {
   outline-offset: 2px;
 }
 
+.cf-node.is-selection-ancestor {
+  box-shadow:
+    0 18px 34px rgba(0, 0, 0, 0.18),
+    0 0 0 2px rgba(247, 186, 61, 0.36);
+}
+
 .cf-node.is-heated {
   border-color: color-mix(in srgb, var(--cf-heat-color) 52%, rgba(255, 255, 255, 0.18));
 }
@@ -627,6 +663,25 @@ body {
   gap: 2px;
   overflow: hidden;
   flex: 1;
+}
+
+.cf-node__expand-button {
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--accent-amber);
+  cursor: pointer;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.cf-node__expand-button:hover {
+  border-color: rgba(247, 186, 61, 0.6);
+  background: rgba(247, 186, 61, 0.14);
 }
 
 .cf-node__label-row {
@@ -746,6 +801,20 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.cf-node__inspect-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cf-node__inspect-button:hover {
+  color: var(--accent-amber);
 }
 
 .cf-node__class-lines {
@@ -913,6 +982,17 @@ body {
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.cf-node__member-chip--action {
+  border: 1px solid rgba(77, 215, 209, 0.18);
+  cursor: pointer;
+  font: inherit;
+}
+
+.cf-node__member-chip--action:hover {
+  border-color: rgba(247, 186, 61, 0.5);
+  background: rgba(247, 186, 61, 0.16);
 }
 
 .cf-node__member-chip--package {

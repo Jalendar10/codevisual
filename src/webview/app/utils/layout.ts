@@ -3,11 +3,28 @@ import { Edge, Node } from '@xyflow/react';
 import { GraphLayoutAlgorithm } from '../../../types';
 
 const DEFAULT_SIZE = { width: 380, height: 220 };
+const LAYOUT_GAP = 36;
+
+function readStyleNumber(node: Node, key: 'width' | 'minWidth' | 'height' | 'minHeight'): number {
+  const style = node.style as Record<string, string | number> | undefined;
+  const value = style?.[key];
+  return typeof value === 'number' ? value : 0;
+}
 
 // Estimate node height based on content — auto-adjust for class/method count
 function estimateNodeHeight(node: Node): number {
   const data = node.data as Record<string, unknown>;
+  const isExpanded = data.expanded !== false;
   let height = 80; // base header + footer
+
+  if (!isExpanded && data.expandable) {
+    if (data.lineCount || data.byteSize) {
+      height += 72;
+    } else if (data.childCount) {
+      height += 40;
+    }
+    return Math.max(136, height);
+  }
 
   // Methods contribute to height
   const methodCount = (data.methodCount as number) || 0;
@@ -44,6 +61,10 @@ function estimateNodeWidth(node: Node): number {
   const label = (data.label as string) || '';
   let width = Math.max(280, label.length * 9 + 60);
 
+  if (data.expanded === false && data.expandable) {
+    return Math.min(width, 420);
+  }
+
   const classSummaries = data.classSummaries as Array<{ name: string; methods: string[] }> | undefined;
   if (classSummaries?.length) {
     for (const cls of classSummaries) {
@@ -55,6 +76,25 @@ function estimateNodeWidth(node: Node): number {
   }
 
   return Math.min(width, 500); // cap at 500
+}
+
+function resolveNodeSize(node: Node): { width: number; height: number } {
+  const estimatedWidth = estimateNodeWidth(node);
+  const estimatedHeight = estimateNodeHeight(node);
+  const width = Math.max(
+    DEFAULT_SIZE.width,
+    estimatedWidth,
+    readStyleNumber(node, 'width'),
+    readStyleNumber(node, 'minWidth')
+  );
+  const height = Math.max(
+    DEFAULT_SIZE.height,
+    estimatedHeight,
+    readStyleNumber(node, 'height'),
+    readStyleNumber(node, 'minHeight')
+  );
+
+  return { width, height };
 }
 
 export function applyLayout<T extends Record<string, unknown>>(
@@ -87,6 +127,7 @@ function applyDagreLayout<T extends Record<string, unknown>>(
   ranksep: number
 ): Node<T>[] {
   const graph = new dagre.graphlib.Graph();
+  const nodeSizes = new Map<string, { width: number; height: number }>();
   graph.setDefaultEdgeLabel(() => ({}));
   graph.setGraph({
     rankdir: direction,
@@ -97,15 +138,15 @@ function applyDagreLayout<T extends Record<string, unknown>>(
   });
 
   nodes.forEach((node) => {
-    const width = estimateNodeWidth(node) + 40;
-    const height = estimateNodeHeight(node) + 40;
+    const { width, height } = resolveNodeSize(node);
+    nodeSizes.set(node.id, { width, height });
     graph.setNode(node.id, { width, height });
   });
 
   edges.forEach((edge) => graph.setEdge(edge.source, edge.target));
   dagre.layout(graph);
 
-  return nodes.map((node) => {
+  const laidOut = nodes.map((node) => {
     const dagNode = graph.node(node.id);
     if (!dagNode) {
       return node;
@@ -119,6 +160,8 @@ function applyDagreLayout<T extends Record<string, unknown>>(
       },
     };
   });
+
+  return resolveOverlaps(laidOut, nodeSizes, direction);
 }
 
 function applyRadialLayout<T extends Record<string, unknown>>(nodes: Node<T>[], edges: Edge[]): Node<T>[] {
@@ -156,8 +199,9 @@ function applyRadialLayout<T extends Record<string, unknown>>(nodes: Node<T>[], 
   const centerX = 540;
   const centerY = 400;
   const radiusStep = 170;
-
-  return nodes.map((node) => {
+  const nodeSizes = new Map<string, { width: number; height: number }>();
+  const laidOut = nodes.map((node) => {
+    nodeSizes.set(node.id, resolveNodeSize(node));
     const level = levels.get(node.id) || 0;
     const group = grouped.get(level) || [node.id];
     const index = Math.max(0, group.indexOf(node.id));
@@ -172,10 +216,13 @@ function applyRadialLayout<T extends Record<string, unknown>>(nodes: Node<T>[], 
       },
     };
   });
+
+  return resolveOverlaps(laidOut, nodeSizes, 'TB');
 }
 
 function applyForceLayout<T extends Record<string, unknown>>(nodes: Node<T>[], edges: Edge[]): Node<T>[] {
   const state = new Map<string, { x: number; y: number; vx: number; vy: number }>();
+  const nodeSizes = new Map<string, { width: number; height: number }>();
 
   // Build adjacency for faster edge lookup
   const adjOut = new Map<string, string[]>();
@@ -190,6 +237,7 @@ function applyForceLayout<T extends Record<string, unknown>>(nodes: Node<T>[], e
   }
 
   nodes.forEach((node, index) => {
+    nodeSizes.set(node.id, resolveNodeSize(node));
     const angle = (index / Math.max(nodes.length, 1)) * Math.PI * 2;
     state.set(node.id, {
       x: 800 + Math.cos(angle) * 500,
@@ -251,11 +299,64 @@ function applyForceLayout<T extends Record<string, unknown>>(nodes: Node<T>[], e
     });
   }
 
-  return nodes.map((node) => {
+  const laidOut = nodes.map((node) => {
     const position = state.get(node.id)!;
     return {
       ...node,
       position: { x: position.x, y: position.y },
     };
   });
+
+  return resolveOverlaps(laidOut, nodeSizes, 'TB');
+}
+
+function resolveOverlaps<T extends Record<string, unknown>>(
+  nodes: Node<T>[],
+  sizes: Map<string, { width: number; height: number }>,
+  direction: 'TB' | 'LR'
+): Node<T>[] {
+  const adjusted = nodes.map((node) => ({
+    ...node,
+    position: { ...node.position },
+  }));
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    const sorted = [...adjusted].sort((left, right) =>
+      left.position.x === right.position.x
+        ? left.position.y - right.position.y
+        : left.position.x - right.position.x
+    );
+
+    for (let i = 0; i < sorted.length; i += 1) {
+      const current = sorted[i];
+      const currentSize = sizes.get(current.id) || DEFAULT_SIZE;
+
+      for (let j = i + 1; j < sorted.length; j += 1) {
+        const next = sorted[j];
+        const nextSize = sizes.get(next.id) || DEFAULT_SIZE;
+        const overlapsX =
+          current.position.x < next.position.x + nextSize.width + LAYOUT_GAP &&
+          current.position.x + currentSize.width + LAYOUT_GAP > next.position.x;
+        const overlapsY =
+          current.position.y < next.position.y + nextSize.height + LAYOUT_GAP &&
+          current.position.y + currentSize.height + LAYOUT_GAP > next.position.y;
+
+        if (!overlapsX || !overlapsY) {
+          continue;
+        }
+
+        if (direction === 'LR') {
+          const pushDownBy =
+            current.position.y + currentSize.height + LAYOUT_GAP - next.position.y;
+          next.position.y += Math.max(pushDownBy, LAYOUT_GAP);
+        } else {
+          const pushRightBy =
+            current.position.x + currentSize.width + LAYOUT_GAP - next.position.x;
+          next.position.x += Math.max(pushRightBy, LAYOUT_GAP);
+        }
+      }
+    }
+  }
+
+  return adjusted;
 }

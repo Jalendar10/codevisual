@@ -8,6 +8,7 @@ import {
   GitCommitSummary,
   GitWebhookSettings,
   GraphTestStatus,
+  PersistedVisualState,
   TestRunSummary,
   WebviewMessage,
 } from '../types';
@@ -20,6 +21,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
   private queue: WebviewMessage[] = [];
   private ready = false;
   private lastGraph: GraphData | undefined;
+  private lastVisualState: PersistedVisualState | undefined;
   /** The analyzed path, so we can refresh and re-analyze after deserialize. */
   private lastAnalyzedPath: string | undefined;
 
@@ -46,6 +48,11 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
   private readonly testDiffEmitter = new vscode.EventEmitter<{ nodeId?: string }>();
   private readonly applySuggestionEmitter = new vscode.EventEmitter<{ filePath: string; line: number; endLine?: number; original: string; suggested: string }>();
   private readonly runTestsForFileEmitter = new vscode.EventEmitter<{ filePath: string }>();
+  private readonly saveVisualStateEmitter = new vscode.EventEmitter<{
+    graphPath: string;
+    graphType: GraphData['metadata']['type'];
+    state: PersistedVisualState;
+  }>();
 
   readonly onDidRequestOpenLocation = this.openLocationEmitter.event;
   readonly onDidRequestExport = this.exportEmitter.event;
@@ -62,6 +69,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
   readonly onDidRequestTestDiff = this.testDiffEmitter.event;
   readonly onDidApplySuggestion = this.applySuggestionEmitter.event;
   readonly onDidRunTestsForFile = this.runTestsForFileEmitter.event;
+  readonly onDidSaveVisualState = this.saveVisualStateEmitter.event;
 
   constructor(private readonly extensionUri: vscode.Uri) {
     // Register the serializer so the webview restores when dragged to another
@@ -103,7 +111,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
     // Re-send the last graph so the restored panel isn't blank.
     // The message is queued until the webview fires 'ready'.
     if (this.lastGraph) {
-      this.post({ type: 'updateGraph', data: this.lastGraph });
+      this.post({ type: 'updateGraph', data: this.lastGraph, visualState: this.lastVisualState });
     }
   }
 
@@ -159,20 +167,21 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
     );
   }
 
-  updateGraph(graph: GraphData): void {
+  updateGraph(graph: GraphData, visualState?: PersistedVisualState): void {
     this.lastGraph = graph;
+    this.lastVisualState = visualState;
     if (graph.metadata.path) {
       this.lastAnalyzedPath = graph.metadata.path;
     }
-    this.post({ type: 'updateGraph', data: graph });
+    this.post({ type: 'updateGraph', data: graph, visualState });
   }
 
   updateAiStatus(status: { available: boolean; provider: string; message: string; model?: string }): void {
     this.post({ type: 'aiStatus', ...status });
   }
 
-  showAIAnalysisResult(targetLabel: string, analysis: AIAnalysisResult): void {
-    this.post({ type: 'aiAnalysis', targetLabel, analysis });
+  showAIAnalysisResult(nodeId: string | undefined, targetLabel: string, analysis: AIAnalysisResult): void {
+    this.post({ type: 'aiAnalysis', nodeId, targetLabel, analysis });
   }
 
   showCodePreview(preview: CodePreview): void {
@@ -234,6 +243,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
     this.testDiffEmitter.dispose();
     this.applySuggestionEmitter.dispose();
     this.runTestsForFileEmitter.dispose();
+    this.saveVisualStateEmitter.dispose();
   }
 
   private handleMessage(message: ExtensionMessage): void {
@@ -291,6 +301,13 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
         break;
       case 'runTestsForFile':
         this.runTestsForFileEmitter.fire({ filePath: (message as any).filePath });
+        break;
+      case 'saveVisualState':
+        this.saveVisualStateEmitter.fire({
+          graphPath: (message as any).graphPath,
+          graphType: (message as any).graphType,
+          state: (message as any).state,
+        });
         break;
     }
   }

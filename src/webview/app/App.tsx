@@ -22,6 +22,9 @@ import {
   GraphData,
   GraphEdge,
   GraphClassSummary,
+  GraphVisibilityState,
+  GraphViewportState,
+  GraphMethodSummary,
   GraphLayoutAlgorithm,
   GraphNode,
   GraphNodeData,
@@ -29,6 +32,7 @@ import {
   GitAnalysisResult,
   GitCommitSummary,
   GitWebhookSettings,
+  PersistedVisualState,
   TestRunSummary,
   WebviewMessage,
 } from '../../types';
@@ -56,12 +60,12 @@ const nodeTypes = {
   external: ModuleNode,
 };
 
-const defaultVisibility = {
+const defaultVisibility: GraphVisibilityState = {
   folders: true,
   files: true,
   symbols: true,
   tests: true,
-  modules: true,
+  modules: false,
   imports: true,
   calls: true,
   testFlow: true,
@@ -75,11 +79,17 @@ export default function App() {
     activeTab?: ActiveTab;
     overlayMode?: HeatOverlayMode;
     graphData?: GraphData;
+    aiAnalysisCache?: Record<string, { targetLabel: string; analysis: AIAnalysisResult }>;
   }>();
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const selectedNodeIdRef = useRef<string | null>(null);
   const mappingFocusNodeIdRef = useRef<string | null>(null);
+  const pendingViewportRef = useRef<GraphViewportState | null>(null);
+  const layoutCacheRef = useRef<{
+    key: string;
+    positions: Map<string, { x: number; y: number }>;
+  } | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Restore graph from persisted webview state so the panel isn't blank
@@ -134,6 +144,9 @@ export default function App() {
     targetLabel: string;
     analysis: AIAnalysisResult;
   } | null>(null);
+  const [aiAnalysisCache, setAiAnalysisCache] = useState<
+    Record<string, { targetLabel: string; analysis: AIAnalysisResult }>
+  >(state?.aiAnalysisCache ?? {});
   const [testDiff, setTestDiff] = useState<{
     targetLabel: string;
     missingScenarios: string;
@@ -143,8 +156,14 @@ export default function App() {
   const [instance, setInstance] = useState<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
 
   useEffect(() => {
-    vscode.setState({ layout, activeTab, overlayMode, graphData: graph ?? undefined });
-  }, [activeTab, layout, overlayMode, graph, vscode]);
+    vscode.setState({
+      layout,
+      activeTab,
+      overlayMode,
+      graphData: graph ?? undefined,
+      aiAnalysisCache,
+    });
+  }, [activeTab, aiAnalysisCache, layout, overlayMode, graph, vscode]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -153,11 +172,6 @@ export default function App() {
   useEffect(() => {
     mappingFocusNodeIdRef.current = mappingFocusNodeId;
   }, [mappingFocusNodeId]);
-
-  // Clear stale AI analysis whenever the user selects a different node
-  useEffect(() => {
-    setAiAnalysis(null);
-  }, [selectedNodeId]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<WebviewMessage>) => {
@@ -169,41 +183,61 @@ export default function App() {
       switch (message.type) {
         case 'updateGraph':
           {
+          const isManualReset = message.data.metadata.changeEvent?.reason === 'manual';
+          const visualState = message.visualState;
+          const nextGraph = applyPersistedVisualStateToGraph(message.data, visualState);
+          const nextAiCache = visualState?.aiAnalyses || {};
           const preservedSelection =
+            !isManualReset &&
             selectedNodeIdRef.current &&
-            message.data.nodes.some((node) => node.id === selectedNodeIdRef.current)
+            nextGraph.nodes.some((node) => node.id === selectedNodeIdRef.current)
               ? selectedNodeIdRef.current
               : null;
           const preservedMappingFocus =
+            !isManualReset &&
             mappingFocusNodeIdRef.current &&
-            message.data.nodes.some((node) => node.id === mappingFocusNodeIdRef.current)
+            nextGraph.nodes.some((node) => node.id === mappingFocusNodeIdRef.current)
               ? mappingFocusNodeIdRef.current
               : null;
-          setGraph(message.data);
-          setRawNodes(message.data.nodes);
-          setRawEdges(message.data.edges);
+          setGraph(nextGraph);
+          setRawNodes(nextGraph.nodes);
+          setRawEdges(nextGraph.edges);
           setSelectedNodeId(preservedSelection);
-          setAiAnalysis(null);
+          setAiAnalysisCache(nextAiCache);
           setCodePreview(null);
           setContextMenu(null);
           setMappingFocusNodeId(preservedMappingFocus);
+          setSearchQuery(visualState?.searchQuery || '');
+          setVisibility(visualState?.visibility || defaultVisibility);
+          setLayout(visualState?.layout || state?.layout || 'hierarchical');
+          setOverlayMode(visualState?.overlayMode || 'none');
+          setActiveTab(visualState?.activeTab || 'visual');
+          pendingViewportRef.current = visualState?.viewport || null;
           setAffectedNodeIds([]);
           setTestSummary(null);
           setError(null);
           setIsLoading(false);
           setStatusMessage(null);
           // Request fitView for the new graph
-          if (!preservedSelection) {
+          if (!pendingViewportRef.current && (isManualReset || !preservedSelection)) {
             fitViewTrigger.current += 1;
           }
           break;
           }
         case 'aiAnalysis':
+          {
+          const analysisNodeId = message.nodeId || lastAiRequestNodeId || undefined;
+          if (analysisNodeId) {
+            setAiAnalysisCache((current) => ({
+              ...current,
+              [analysisNodeId]: { targetLabel: message.targetLabel, analysis: message.analysis },
+            }));
+          }
           setAiAnalysis({ targetLabel: message.targetLabel, analysis: message.analysis });
           setRawNodes((current) =>
-            lastAiRequestNodeId
+            analysisNodeId
               ? current.map((node) =>
-                  node.id === lastAiRequestNodeId
+                  node.id === analysisNodeId
                     ? {
                         ...node,
                         data: {
@@ -220,6 +254,7 @@ export default function App() {
             message: `Copilot analysis updated for ${message.targetLabel}.`,
           });
           break;
+          }
         case 'aiStatus':
           setAiStatus({
             available: message.available,
@@ -303,43 +338,10 @@ export default function App() {
     [mappingFocusNodeId, rawEdges, selectedNodeId]
   );
 
-  useEffect(() => {
-    const rendered = buildRenderableGraph(
-      rawNodes,
-      rawEdges,
-      visibility,
-      searchQuery,
-      layout,
-      mappingFocusNodeId,
-      affectedNodeIds,
-      dependencyImpact,
-      overlayMode
-    );
-    setNodes(rendered.nodes);
-    setEdges(rendered.edges);
-
-    // Only fitView when a graph-load or layout-change explicitly requested it.
-    // Expand/collapse and search do NOT call fitView so the user's zoom is preserved.
-    if (fitViewTrigger.current !== fitViewGeneration.current) {
-      fitViewGeneration.current = fitViewTrigger.current;
-      requestAnimationFrame(() => {
-        instance?.fitView({ padding: 0.12, duration: 350 });
-      });
-    }
-  }, [
-    rawNodes,
-    rawEdges,
-    visibility,
-    searchQuery,
-    layout,
-    mappingFocusNodeId,
-    affectedNodeIds,
-    dependencyImpact,
-    overlayMode,
-    instance,
-    setEdges,
-    setNodes,
-  ]);
+  const selectionLineage = useMemo(
+    () => collectSelectionLineage(selectedNodeId, rawNodes, rawEdges),
+    [rawEdges, rawNodes, selectedNodeId]
+  );
 
   useEffect(() => {
     if (!statusMessage) {
@@ -411,6 +413,15 @@ export default function App() {
     );
   }, [rawNodes, selectedNode]);
 
+  useEffect(() => {
+    if (!analysisTargetNode) {
+      setAiAnalysis(null);
+      return;
+    }
+
+    setAiAnalysis(aiAnalysisCache[analysisTargetNode.id] || null);
+  }, [aiAnalysisCache, analysisTargetNode]);
+
   const graphStats = useMemo(() => {
     const testNodes = rawNodes.filter((node) => node.type === 'test').length;
     const fileNodes = rawNodes.filter((node) => node.type === 'file').length;
@@ -441,6 +452,124 @@ export default function App() {
     return resolveMappingNode(selectedNode, rawNodes);
   }, [rawNodes, selectedNode]);
 
+  const toggleNodeExpansion = useCallback((nodeId: string) => {
+    setRawNodes((current) => toggleExpandedState(current, nodeId));
+    setMappingFocusNodeId((current) =>
+      current && isAncestorOrSelfNode(rawNodes, nodeId, current) ? null : current
+    );
+  }, [rawNodes]);
+
+  const inspectSymbolFlow = useCallback(
+    (nodeId: string) => {
+      const targetNode = rawNodes.find((node) => node.id === nodeId);
+      if (!targetNode) {
+        return;
+      }
+
+      setRawNodes((current) => expandNodePath(current, nodeId));
+      setSelectedNodeId(nodeId);
+      setMappingFocusNodeId(nodeId);
+      setVisibility((current) => ({ ...current, symbols: true, calls: true, dataFlow: true }));
+      setActiveTab('visual');
+      setContextMenu(null);
+
+      if (targetNode.data.filePath) {
+        vscode.postMessage({ type: 'requestCodePreview', nodeId });
+      }
+    },
+    [rawNodes, vscode]
+  );
+
+  useEffect(() => {
+    const rendered = buildRenderableGraph(
+      rawNodes,
+      rawEdges,
+      visibility,
+      searchQuery,
+      layout,
+      mappingFocusNodeId,
+      affectedNodeIds,
+      dependencyImpact,
+      selectionLineage,
+      overlayMode,
+      toggleNodeExpansion,
+      inspectSymbolFlow,
+      layoutCacheRef
+    );
+    setNodes(rendered.nodes);
+    setEdges(rendered.edges);
+
+    // Only fitView when a graph-load or layout-change explicitly requested it.
+    // Expand/collapse and search do NOT call fitView so the user's zoom is preserved.
+    if (pendingViewportRef.current && instance) {
+      const viewport = pendingViewportRef.current;
+      pendingViewportRef.current = null;
+      requestAnimationFrame(() => {
+        instance.setViewport(viewport, { duration: 0 });
+      });
+    } else if (fitViewTrigger.current !== fitViewGeneration.current) {
+      fitViewGeneration.current = fitViewTrigger.current;
+      requestAnimationFrame(() => {
+        instance?.fitView({ padding: 0.12, duration: 350 });
+      });
+    }
+  }, [
+    rawNodes,
+    rawEdges,
+    visibility,
+    searchQuery,
+    layout,
+    mappingFocusNodeId,
+    affectedNodeIds,
+    dependencyImpact,
+    selectionLineage,
+    overlayMode,
+    toggleNodeExpansion,
+    inspectSymbolFlow,
+    instance,
+    setEdges,
+    setNodes,
+  ]);
+
+  useEffect(() => {
+    if (!graph?.metadata.path || graph.metadata.type === 'selection') {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const persisted = buildPersistedVisualState(
+        graph,
+        rawNodes,
+        layout,
+        activeTab,
+        overlayMode,
+        visibility,
+        searchQuery,
+        instance?.getViewport(),
+        aiAnalysisCache
+      );
+      vscode.postMessage({
+        type: 'saveVisualState',
+        graphPath: graph.metadata.path!,
+        graphType: graph.metadata.type,
+        state: persisted,
+      });
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    activeTab,
+    aiAnalysisCache,
+    graph,
+    instance,
+    layout,
+    overlayMode,
+    rawNodes,
+    searchQuery,
+    visibility,
+    vscode,
+  ]);
+
   const toggleVisibility = useCallback((key: keyof typeof defaultVisibility) => {
     setVisibility((current) => ({ ...current, [key]: !current[key] }));
   }, []);
@@ -448,23 +577,8 @@ export default function App() {
   const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
     (_event: MouseEvent, node: FlowNode) => {
       setSelectedNodeId(node.id);
+      setMappingFocusNodeId((current) => (current && current !== node.id ? null : current));
       setContextMenu(null);
-
-      if (node.data.expandable) {
-        setRawNodes((current) =>
-          current.map((item) =>
-            item.id === node.id
-              ? {
-                  ...item,
-                  data: {
-                    ...item.data,
-                    expanded: !(item.data.expanded ?? true),
-                  },
-                }
-              : item
-          )
-        );
-      }
 
       if (node.data.filePath) {
         vscode.postMessage({ type: 'requestCodePreview', nodeId: node.id });
@@ -475,21 +589,9 @@ export default function App() {
 
   const onNodeDoubleClick: NodeMouseHandler<FlowNode> = useCallback(
     (_event: MouseEvent, node: FlowNode) => {
-      setRawNodes((current) =>
-        current.map((item) =>
-          item.id === node.id
-            ? {
-                ...item,
-                data: {
-                  ...item.data,
-                  expanded: !(item.data.expanded ?? true),
-                },
-              }
-            : item
-        )
-      );
+      toggleNodeExpansion(node.id);
     },
-    []
+    [toggleNodeExpansion]
   );
 
   const onNodeContextMenu: NodeMouseHandler<FlowNode> = useCallback((event: MouseEvent, node: FlowNode) => {
@@ -504,6 +606,7 @@ export default function App() {
 
   const onPaneClick = useCallback(() => {
     setSelectedNodeId(null);
+    setMappingFocusNodeId(null);
     setContextMenu(null);
   }, []);
 
@@ -628,6 +731,7 @@ export default function App() {
 
     setVisibility((current) => ({ ...current, dataFlow: true }));
     setActiveTab('visual');
+    setRawNodes((current) => expandNodePath(current, mappingTargetNode.id));
     setMappingFocusNodeId((current) => (current === mappingTargetNode.id ? null : mappingTargetNode.id));
   }, [mappingTargetNode]);
 
@@ -1138,17 +1242,6 @@ export default function App() {
                   Mapping
                 </button>
               </div>
-              {selectedNode.data.packageRefs?.length ? (
-                <div className="detail-sidebar__stack">
-                  <span>Packages</span>
-                  <strong>
-                    {selectedNode.data.packageRefs
-                      .slice(0, 8)
-                      .map((ref) => ref.name)
-                      .join(', ')}
-                  </strong>
-                </div>
-              ) : null}
               {!mappingFocusNodeId &&
               (dependencyImpact.upstreamNodes.size > 0 || dependencyImpact.downstreamNodes.size > 0) ? (
                 <div className="detail-sidebar__stack">
@@ -1171,10 +1264,24 @@ export default function App() {
                   </strong>
                 </div>
               ) : null}
+              {selectedNode.data.memberDetails?.length ? (
+                <div className="detail-sidebar__stack">
+                  <span>Top-Level Methods</span>
+                  <DetailMethodSummaries
+                    methods={selectedNode.data.memberDetails}
+                    onInspectSymbol={inspectSymbolFlow}
+                    activeNodeId={selectedNodeId}
+                  />
+                </div>
+              ) : null}
               {selectedNode.data.classSummaries?.length ? (
                 <div className="detail-sidebar__stack">
                   <span>Classes &amp; Methods</span>
-                  <DetailClassSummaries summaries={selectedNode.data.classSummaries} />
+                  <DetailClassSummaries
+                    summaries={selectedNode.data.classSummaries}
+                    onInspectSymbol={inspectSymbolFlow}
+                    activeNodeId={selectedNodeId}
+                  />
                 </div>
               ) : null}
               {testSummary?.affectedTargets?.length ? (
@@ -1731,40 +1838,112 @@ function CodeSection({ title, code }: { title: string; code?: string }) {
   );
 }
 
-function DetailClassSummaries({ summaries }: { summaries: GraphClassSummary[] }) {
+function renderDetailInspectButton(
+  label: string,
+  nodeId: string | undefined,
+  onInspectSymbol?: (nodeId: string) => void,
+  active = false,
+  className = 'detail-sidebar__method-name',
+  suffix = ''
+) {
+  if (!nodeId || !onInspectSymbol) {
+    return <div className={className}>{label}{suffix}</div>;
+  }
+
+  return (
+    <button
+      type="button"
+      className={`${className} detail-sidebar__inspect-button ${active ? 'is-active' : ''}`}
+      onClick={() => onInspectSymbol(nodeId)}
+      title={`Inspect ${label}${suffix ? suffix.replace(/[()]/g, '') : ''} data flow`}
+    >
+      {label}
+      {suffix}
+    </button>
+  );
+}
+
+function DetailMethodSummaries({
+  methods,
+  onInspectSymbol,
+  activeNodeId,
+}: {
+  methods: GraphMethodSummary[];
+  onInspectSymbol?: (nodeId: string) => void;
+  activeNodeId?: string | null;
+}) {
+  return (
+    <div className="detail-sidebar__method-list">
+      {methods.slice(0, 10).map((method) => (
+        <div key={`${method.nodeId || method.name}-${method.name}`} className="detail-sidebar__method-line">
+          {renderDetailInspectButton(
+            method.name,
+            method.nodeId,
+            onInspectSymbol,
+            activeNodeId === method.nodeId,
+            'detail-sidebar__method-name',
+            '()'
+          )}
+          {method.flowsTo?.length ? (
+            <div className="detail-sidebar__method-flows">
+              {method.flowsTo.slice(0, 4).map((flow) => (
+                <div key={`${method.name}-to-${flow}`} className="detail-sidebar__method-flow">
+                  → {flow}
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {method.flowsFrom?.length ? (
+            <div className="detail-sidebar__method-flows">
+              {method.flowsFrom.slice(0, 3).map((flow) => (
+                <div key={`${method.name}-from-${flow}`} className="detail-sidebar__method-flow is-inbound">
+                  ← {flow}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DetailClassSummaries({
+  summaries,
+  onInspectSymbol,
+  activeNodeId,
+}: {
+  summaries: GraphClassSummary[];
+  onInspectSymbol?: (nodeId: string) => void;
+  activeNodeId?: string | null;
+}) {
   return (
     <div className="detail-sidebar__class-list">
       {summaries.slice(0, 4).map((summary) => (
         <div key={`${summary.kind}-${summary.name}`} className="detail-sidebar__class-card">
           <div className="detail-sidebar__class-title">
-            <em>{summary.name}</em>
+            {renderDetailInspectButton(
+              summary.name,
+              summary.nodeId,
+              onInspectSymbol,
+              activeNodeId === summary.nodeId,
+              'detail-sidebar__class-button'
+            )}
             <span>{summary.kind}</span>
           </div>
-          {(summary.methodDetails?.length
-            ? summary.methodDetails
-            : summary.methods.map((name) => ({ name, flowsTo: [], flowsFrom: [] }))).map((method) => (
-            <div key={`${summary.name}-${method.name}`} className="detail-sidebar__method-line">
-              <div className="detail-sidebar__method-name">{method.name}()</div>
-              {method.flowsTo?.length ? (
-                <div className="detail-sidebar__method-flows">
-                  {method.flowsTo.slice(0, 4).map((flow) => (
-                    <div key={`${summary.name}-${method.name}-to-${flow}`} className="detail-sidebar__method-flow">
-                      → {flow}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-              {method.flowsFrom?.length ? (
-                <div className="detail-sidebar__method-flows">
-                  {method.flowsFrom.slice(0, 3).map((flow) => (
-                    <div key={`${summary.name}-${method.name}-from-${flow}`} className="detail-sidebar__method-flow is-inbound">
-                      ← {flow}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ))}
+          <DetailMethodSummaries
+            methods={
+              summary.methodDetails?.length
+                ? summary.methodDetails
+                : summary.methods.map((name): GraphMethodSummary => ({
+                    name,
+                    flowsTo: [],
+                    flowsFrom: [],
+                  }))
+            }
+            onInspectSymbol={onInspectSymbol}
+            activeNodeId={activeNodeId}
+          />
         </div>
       ))}
     </div>
@@ -1777,6 +1956,12 @@ interface DependencyImpact {
   downstreamNodes: Set<string>;
   upstreamEdges: Set<string>;
   downstreamEdges: Set<string>;
+}
+
+interface SelectionLineage {
+  focusNodeId: string | null;
+  ancestorNodes: Set<string>;
+  ancestorEdges: Set<string>;
 }
 
 function emptyDependencyImpact(): DependencyImpact {
@@ -1863,6 +2048,47 @@ function collectDependencyImpact(
   return impact;
 }
 
+function collectSelectionLineage(
+  selectedNodeId: string | null,
+  rawNodes: GraphNode[],
+  rawEdges: GraphEdge[]
+): SelectionLineage {
+  if (!selectedNodeId) {
+    return {
+      focusNodeId: null,
+      ancestorNodes: new Set<string>(),
+      ancestorEdges: new Set<string>(),
+    };
+  }
+
+  const nodeMap = new Map(rawNodes.map((node) => [node.id, node]));
+  const containsEdgeMap = new Map<string, string>();
+  rawEdges.forEach((edge) => {
+    if (edge.type === 'contains') {
+      containsEdgeMap.set(`${edge.source}:${edge.target}`, edge.id);
+    }
+  });
+
+  const ancestorNodes = new Set<string>();
+  const ancestorEdges = new Set<string>();
+  let current = nodeMap.get(selectedNodeId);
+
+  while (current?.data.parentId) {
+    ancestorNodes.add(current.data.parentId);
+    const edgeId = containsEdgeMap.get(`${current.data.parentId}:${current.id}`);
+    if (edgeId) {
+      ancestorEdges.add(edgeId);
+    }
+    current = nodeMap.get(current.data.parentId);
+  }
+
+  return {
+    focusNodeId: selectedNodeId,
+    ancestorNodes,
+    ancestorEdges,
+  };
+}
+
 function buildRenderableGraph(
   rawNodes: GraphNode[],
   rawEdges: GraphEdge[],
@@ -1872,7 +2098,14 @@ function buildRenderableGraph(
   mappingFocusNodeId: string | null,
   affectedNodeIds: string[],
   dependencyImpact: DependencyImpact,
-  overlayMode: HeatOverlayMode
+  selectionLineage: SelectionLineage,
+  overlayMode: HeatOverlayMode,
+  onToggleExpand: (nodeId: string) => void,
+  onInspectSymbol: (nodeId: string) => void,
+  layoutCacheRef: React.MutableRefObject<{
+    key: string;
+    positions: Map<string, { x: number; y: number }>;
+  } | null>
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const nodeMap = new Map(rawNodes.map((node) => [node.id, node]));
   const loweredQuery = searchQuery.trim().toLowerCase();
@@ -1888,7 +2121,7 @@ function buildRenderableGraph(
       .map((node) => node.id)
   );
   const affectedSet = new Set(affectedNodeIds);
-  const mappingSet = collectMappingFocusIds(mappingFocusNodeId, rawEdges);
+  const mappingSet = collectMappingFocusIds(mappingFocusNodeId, rawEdges, rawNodes);
   const hasImpact = dependencyImpact.focusNodeId !== null;
 
   const visibleNodes = rawNodes.filter((node) => {
@@ -1904,12 +2137,39 @@ function buildRenderableGraph(
   });
 
   const visibleIds = new Set(visibleNodes.map((node) => node.id));
+  const visibleEdges = rawEdges
+    .filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target))
+    .filter((edge) => matchesEdgeVisibility(edge.type, visibility));
+  const layoutKey = createLayoutCacheKey(visibleNodes, visibleEdges, visibility, layout);
+  let layoutPositions = layoutCacheRef.current?.key === layoutKey
+    ? layoutCacheRef.current.positions
+    : undefined;
+
+  if (!layoutPositions) {
+    const layoutSeedNodes = visibleNodes.map<FlowNode>((node) => ({
+      id: node.id,
+      type: node.type,
+      position: node.position,
+      data: node.data,
+      draggable: true,
+      selectable: true,
+      style: displayNodeStyle(node),
+    }));
+    const laidOutNodes = applyLayout(layoutSeedNodes, visibleEdges, layout);
+    layoutPositions = new Map(
+      laidOutNodes.map((node) => [node.id, { x: node.position.x, y: node.position.y }])
+    );
+    layoutCacheRef.current = { key: layoutKey, positions: layoutPositions };
+  }
+
   const flowNodes = visibleNodes.map<FlowNode>((node) => ({
     id: node.id,
     type: node.type,
-    position: node.position,
+    position: layoutPositions.get(node.id) || node.position,
     data: {
       ...node.data,
+      onToggleExpand,
+      onInspectSymbol,
       overlayMode,
       heatRank:
         overlayMode === 'complexity'
@@ -1919,30 +2179,43 @@ function buildRenderableGraph(
             : 0,
       impactRole:
         mappingSet.size > 0 ? undefined : resolveNodeImpactRole(node.id, dependencyImpact),
+      selectionPathRole:
+        node.id === selectionLineage.focusNodeId
+          ? 'selected'
+          : selectionLineage.ancestorNodes.has(node.id)
+            ? 'ancestor'
+            : undefined,
     },
     draggable: true,
     selectable: true,
     style: {
-      ...node.style,
+      ...displayNodeStyle(node),
       opacity: resolveNodeOpacity(
         node.id,
         matchedIds,
         loweredQuery,
         mappingSet,
         affectedSet,
-        dependencyImpact
+        dependencyImpact,
+        selectionLineage
       ),
     },
   }));
 
-  const flowEdges = rawEdges
-    .filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target))
-    .filter((edge) => matchesEdgeVisibility(edge.type, visibility))
-    .map<FlowEdge>((edge) => {
+  const flowEdges = visibleEdges.map<FlowEdge>((edge) => {
       const highlight =
-        edgeIsHighlighted(edge, loweredQuery, matchedIds, mappingSet, affectedSet, dependencyImpact);
+        edgeIsHighlighted(
+          edge,
+          loweredQuery,
+          matchedIds,
+          mappingSet,
+          affectedSet,
+          dependencyImpact,
+          selectionLineage
+        );
       const impactRole = mappingSet.size > 0 ? undefined : resolveEdgeImpactRole(edge, dependencyImpact);
-      const color = edgeColor(edge.type, impactRole);
+      const isSelectionPathEdge = selectionLineage.ancestorEdges.has(edge.id);
+      const color = edgeColor(edge.type, impactRole, isSelectionPathEdge);
 
       return {
         id: edge.id,
@@ -1954,7 +2227,9 @@ function buildRenderableGraph(
         style: {
           stroke: color,
           strokeWidth:
-            impactRole
+            isSelectionPathEdge
+              ? 3.8
+              : impactRole
               ? 3.6
               : edge.type === 'contains'
               ? 1.4
@@ -1987,8 +2262,66 @@ function buildRenderableGraph(
     });
 
   return {
-    nodes: applyLayout(flowNodes, flowEdges, layout),
+    nodes: flowNodes,
     edges: flowEdges,
+  };
+}
+
+function createLayoutCacheKey(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  visibility: typeof defaultVisibility,
+  layout: GraphLayoutAlgorithm
+): string {
+  const nodeKey = nodes
+    .map((node) =>
+      [
+        node.id,
+        node.type,
+        node.data.parentId || '',
+        node.data.expandable ? '1' : '0',
+        node.data.expanded === false ? '0' : '1',
+        String(node.style?.width || ''),
+        String(node.style?.minHeight || ''),
+      ].join(':')
+    )
+    .join('|');
+  const edgeKey = edges
+    .map((edge) => `${edge.id}:${edge.source}:${edge.target}:${edge.type}`)
+    .join('|');
+  const visibilityKey = Object.values(visibility)
+    .map((value) => (value ? '1' : '0'))
+    .join('');
+
+  return `${layout}::${visibilityKey}::${nodeKey}::${edgeKey}`;
+}
+
+function displayNodeStyle(node: GraphNode): Record<string, string | number> | undefined {
+  if (!node.style) {
+    return undefined;
+  }
+
+  if (!node.data.expandable || node.data.expanded !== false) {
+    return node.style;
+  }
+
+  if (node.type === 'file') {
+    return {
+      ...node.style,
+      minHeight: 176,
+    };
+  }
+
+  if (node.type === 'folder') {
+    return {
+      ...node.style,
+      minHeight: 110,
+    };
+  }
+
+  return {
+    ...node.style,
+    minHeight: 126,
   };
 }
 
@@ -2061,8 +2394,13 @@ function isHiddenByCollapsedAncestor(
 
 function edgeColor(
   type: GraphEdge['type'],
-  impactRole?: 'upstream' | 'downstream'
+  impactRole?: 'upstream' | 'downstream',
+  isSelectionPathEdge = false
 ): string {
+  if (isSelectionPathEdge) {
+    return '#f7ba3d';
+  }
+
   if (impactRole === 'upstream') {
     return '#f06a5f';
   }
@@ -2160,7 +2498,8 @@ function hexToRgb(hex: string): [number, number, number] {
 
 function collectMappingFocusIds(
   mappingFocusNodeId: string | null,
-  rawEdges: GraphEdge[]
+  rawEdges: GraphEdge[],
+  rawNodes: GraphNode[]
 ): Set<string> {
   const focusIds = new Set<string>();
   if (!mappingFocusNodeId) {
@@ -2173,9 +2512,31 @@ function collectMappingFocusIds(
     'dataFlow', 'call', 'inheritance', 'implementation',
     'sqlMapping', 'inject', 'testFlow', 'reference',
   ]);
+  const containsChildren = new Map<string, string[]>();
+  rawEdges.forEach((edge) => {
+    if (edge.type !== 'contains') {
+      return;
+    }
 
-  focusIds.add(mappingFocusNodeId);
-  const queue = [mappingFocusNodeId];
+    const children = containsChildren.get(edge.source) || [];
+    children.push(edge.target);
+    containsChildren.set(edge.source, children);
+  });
+
+  const seedIds = new Set<string>([mappingFocusNodeId]);
+  const seedQueue = [mappingFocusNodeId];
+  while (seedQueue.length > 0) {
+    const current = seedQueue.shift()!;
+    for (const childId of containsChildren.get(current) || []) {
+      if (!seedIds.has(childId)) {
+        seedIds.add(childId);
+        seedQueue.push(childId);
+      }
+    }
+  }
+
+  seedIds.forEach((id) => focusIds.add(id));
+  const queue = Array.from(seedIds);
 
   while (queue.length > 0) {
     const current = queue.shift()!;
@@ -2205,7 +2566,8 @@ function resolveNodeOpacity(
   loweredQuery: string,
   mappingSet: Set<string>,
   affectedSet: Set<string>,
-  dependencyImpact: DependencyImpact
+  dependencyImpact: DependencyImpact,
+  selectionLineage: SelectionLineage
 ): number {
   let opacity = 1;
 
@@ -2229,6 +2591,10 @@ function resolveNodeOpacity(
     opacity = inImpact ? 1 : Math.min(opacity, 0.2);
   }
 
+  if (nodeId === selectionLineage.focusNodeId || selectionLineage.ancestorNodes.has(nodeId)) {
+    opacity = 1;
+  }
+
   return opacity;
 }
 
@@ -2238,8 +2604,13 @@ function edgeIsHighlighted(
   matchedIds: Set<string>,
   mappingSet: Set<string>,
   affectedSet: Set<string>,
-  dependencyImpact: DependencyImpact
+  dependencyImpact: DependencyImpact,
+  selectionLineage: SelectionLineage
 ): boolean {
+  if (selectionLineage.ancestorEdges.has(edge.id)) {
+    return true;
+  }
+
   if (mappingSet.size > 0) {
     return mappingSet.has(edge.source) && mappingSet.has(edge.target);
   }
@@ -2308,7 +2679,7 @@ function resolveEdgeImpactRole(
 }
 
 function resolveMappingNode(selectedNode: GraphNode, rawNodes: GraphNode[]): GraphNode | null {
-  if (selectedNode.data.dataMappings?.length) {
+  if (!['folder', 'module', 'external'].includes(selectedNode.type || '')) {
     return selectedNode;
   }
 
@@ -2317,6 +2688,121 @@ function resolveMappingNode(selectedNode: GraphNode, rawNodes: GraphNode[]): Gra
   );
 
   return byFilePath || null;
+}
+
+function toggleExpandedState(rawNodes: GraphNode[], nodeId: string): GraphNode[] {
+  return rawNodes.map((node) =>
+    node.id === nodeId && node.data.expandable
+      ? {
+          ...node,
+          data: {
+            ...node.data,
+            expanded: !(node.data.expanded ?? true),
+          },
+        }
+      : node
+  );
+}
+
+function expandNodePath(rawNodes: GraphNode[], nodeId: string): GraphNode[] {
+  const nodeMap = new Map(rawNodes.map((node) => [node.id, node]));
+  const expandIds = new Set<string>();
+  let current = nodeMap.get(nodeId);
+
+  while (current) {
+    if (current.data.expandable) {
+      expandIds.add(current.id);
+    }
+
+    const parentId = current.data.parentId;
+    current = parentId ? nodeMap.get(parentId) : undefined;
+  }
+
+  if (expandIds.size === 0) {
+    return rawNodes;
+  }
+
+  return rawNodes.map((node) =>
+    expandIds.has(node.id)
+      ? {
+          ...node,
+          data: {
+            ...node.data,
+            expanded: true,
+          },
+        }
+      : node
+  );
+}
+
+function isAncestorOrSelfNode(rawNodes: GraphNode[], ancestorId: string, nodeId: string): boolean {
+  const nodeMap = new Map(rawNodes.map((node) => [node.id, node]));
+  let current = nodeMap.get(nodeId);
+
+  while (current) {
+    if (current.id === ancestorId) {
+      return true;
+    }
+
+    const parentId = current.data.parentId;
+    current = parentId ? nodeMap.get(parentId) : undefined;
+  }
+
+  return false;
+}
+
+function buildPersistedVisualState(
+  graph: GraphData,
+  rawNodes: GraphNode[],
+  layout: GraphLayoutAlgorithm,
+  activeTab: ActiveTab,
+  overlayMode: HeatOverlayMode,
+  visibility: GraphVisibilityState,
+  searchQuery: string,
+  viewport: GraphViewportState | undefined,
+  aiAnalysisCache: Record<string, { targetLabel: string; analysis: AIAnalysisResult }>
+): PersistedVisualState {
+  return {
+    savedAt: Date.now(),
+    graphPath: graph.metadata.path || '',
+    graphType: graph.metadata.type,
+    activeTab,
+    layout,
+    overlayMode,
+    visibility,
+    searchQuery,
+    expandedNodeIds: rawNodes
+      .filter((node) => node.data.expandable && node.data.expanded !== false)
+      .map((node) => node.id),
+    viewport,
+    aiAnalyses: aiAnalysisCache,
+  };
+}
+
+function applyPersistedVisualStateToGraph(
+  graph: GraphData,
+  visualState?: PersistedVisualState
+): GraphData {
+  if (!visualState) {
+    return graph;
+  }
+
+  const expandedIds = new Set(visualState.expandedNodeIds || []);
+  const aiAnalyses = visualState.aiAnalyses || {};
+
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) => ({
+      ...node,
+      data: {
+        ...node.data,
+        expanded: node.data.expandable
+          ? expandedIds.has(node.id)
+          : node.data.expanded,
+        summary: aiAnalyses[node.id]?.analysis.summary || node.data.summary,
+      },
+    })),
+  };
 }
 
 function exportFileName(

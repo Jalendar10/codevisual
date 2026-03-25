@@ -192,6 +192,7 @@ export type GraphTestStatus =
   | 'failed';
 
 export interface GraphClassSummary {
+  nodeId?: string;
   name: string;
   kind: 'class' | 'interface' | 'type' | 'enum';
   methods: string[];
@@ -205,6 +206,7 @@ export interface GraphClassSummary {
 }
 
 export interface GraphMethodSummary {
+  nodeId?: string;
   name: string;
   kind?: 'method' | 'function' | 'test' | 'hook' | 'component' | 'route';
   lineCount?: number;
@@ -272,6 +274,7 @@ export interface GraphNodeData {
   exports?: string[];
   childCount?: number;
   memberNames?: string[];
+  memberDetails?: GraphMethodSummary[];
   classSummaries?: GraphClassSummary[];
   packageRefs?: PackageReference[];
   dataMappings?: DataFlowMapping[];
@@ -285,6 +288,7 @@ export interface GraphNodeData {
   overlayMode?: 'none' | 'complexity' | 'hotspot';
   heatRank?: number;
   impactRole?: 'selected' | 'upstream' | 'downstream' | 'both';
+  selectionPathRole?: 'selected' | 'ancestor';
   testStatus?: GraphTestStatus;
   expandable?: boolean;
   expanded?: boolean;
@@ -294,6 +298,8 @@ export interface GraphNodeData {
   changed?: boolean;
   summary?: string;
   searchText?: string;
+  onToggleExpand?: (nodeId: string) => void;
+  onInspectSymbol?: (nodeId: string) => void;
 }
 
 export interface GraphNode {
@@ -434,9 +440,41 @@ export interface GitWebhookSettings {
   webhookSecret: string;
 }
 
+export interface GraphVisibilityState {
+  folders: boolean;
+  files: boolean;
+  symbols: boolean;
+  tests: boolean;
+  modules: boolean;
+  imports: boolean;
+  calls: boolean;
+  testFlow: boolean;
+  dataFlow: boolean;
+}
+
+export interface GraphViewportState {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+export interface PersistedVisualState {
+  savedAt: number;
+  graphPath: string;
+  graphType: GraphData['metadata']['type'];
+  activeTab?: 'visual' | 'settings';
+  layout?: GraphLayoutAlgorithm;
+  overlayMode?: 'none' | 'complexity' | 'hotspot';
+  visibility?: GraphVisibilityState;
+  searchQuery?: string;
+  expandedNodeIds?: string[];
+  viewport?: GraphViewportState;
+  aiAnalyses?: Record<string, { targetLabel: string; analysis: AIAnalysisResult }>;
+}
+
 export type WebviewMessage =
-  | { type: 'updateGraph'; data: GraphData }
-  | { type: 'aiAnalysis'; analysis: AIAnalysisResult; targetLabel: string }
+  | { type: 'updateGraph'; data: GraphData; visualState?: PersistedVisualState }
+  | { type: 'aiAnalysis'; nodeId?: string; analysis: AIAnalysisResult; targetLabel: string }
   | { type: 'aiStatus'; available: boolean; provider: string; message: string; model?: string }
   | { type: 'aiModels'; models: Array<{ id: string; family: string }> }
   | { type: 'codePreview'; preview: CodePreview }
@@ -480,4 +518,5 @@ export type ExtensionMessage =
   | { type: 'selectModel'; modelId: string }
   | { type: 'requestTestDiff'; nodeId?: string }
   | { type: 'applySuggestion'; filePath: string; line: number; endLine?: number; original: string; suggested: string }
+  | { type: 'saveVisualState'; graphPath: string; graphType: GraphData['metadata']['type']; state: PersistedVisualState }
   | { type: 'runTestsForFile'; filePath: string };

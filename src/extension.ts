@@ -14,6 +14,7 @@ import {
   GraphData,
   GraphNode,
   GraphTestStatus,
+  PersistedVisualState,
   TestRunSummary,
 } from './types';
 
@@ -291,7 +292,7 @@ export function activate(context: vscode.ExtensionContext) {
             : `Analyze this ${node.data.kind || node.type}.`,
       });
 
-      webview?.showAIAnalysisResult(node.data.label, analysis);
+      webview?.showAIAnalysisResult(node.id, node.data.label, analysis);
       webview?.showStatus('success', `Copilot analyzed ${node.data.label}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'AI analysis failed.';
@@ -403,6 +404,15 @@ export function activate(context: vscode.ExtensionContext) {
   // Refresh graph from the webview's refresh button
   webview.onDidRequestRefresh(async () => {
     await refreshGraphFromCurrentState();
+  });
+
+  webview.onDidSaveVisualState(async ({ graphPath, graphType, state }) => {
+    try {
+      savePersistedVisualState(graphPath, graphType, state);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save visual state.';
+      webview?.showStatus('warning', message);
+    }
   });
 
   // Send available Copilot models to the webview settings panel
@@ -777,8 +787,9 @@ async function renderGraph(
         );
 
     currentGraph = await enrichGraph(graph, options.changeEvent);
+    const visualState = loadPersistedVisualState(currentGraph);
     configureGraphWatcher();
-    webview?.updateGraph(currentGraph);
+    webview?.updateGraph(currentGraph, visualState);
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown error while generating graph.';
@@ -934,7 +945,13 @@ async function refreshGraphFromCurrentState(): Promise<void> {
     return;
   }
 
-  await refreshGraphFromCurrentStateWithOptions();
+  await refreshGraphFromCurrentStateWithOptions({
+    changeEvent: {
+      paths: [currentGraph.metadata.path],
+      reason: 'manual',
+      updatedAt: Date.now(),
+    },
+  });
 }
 
 async function refreshGraphFromCurrentStateWithOptions(
@@ -1046,6 +1063,9 @@ function queueWatcherRefresh(uri: vscode.Uri, kind: 'change' | 'create' | 'delet
 
   const filePath = uri.fsPath;
   const targetPath = currentGraph.metadata.path;
+  if (isPersistedVisualStatePath(filePath, targetPath, currentGraph.metadata.type)) {
+    return;
+  }
   if (!isWithinAnalyzedTarget(filePath, targetPath, currentGraph.metadata.type)) {
     return;
   }
@@ -1095,6 +1115,126 @@ function isWithinAnalyzedTarget(
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, '/');
+}
+
+function visualStateKey(graphPath: string, graphType: GraphData['metadata']['type']): string {
+  return `${graphType}:${normalizePath(graphPath)}`;
+}
+
+function resolveVisualStateDirectory(
+  graphPath: string,
+  graphType: GraphData['metadata']['type']
+): string | undefined {
+  if (graphType === 'selection') {
+    return undefined;
+  }
+
+  if (graphType === 'folder') {
+    return graphPath;
+  }
+
+  return getWorkspaceRoot(graphPath) || path.dirname(graphPath);
+}
+
+function resolveVisualStateFilePath(
+  graphPath: string,
+  graphType: GraphData['metadata']['type']
+): string | undefined {
+  const directory = resolveVisualStateDirectory(graphPath, graphType);
+  return directory ? path.join(directory, '.cv') : undefined;
+}
+
+function isPersistedVisualStatePath(
+  filePath: string,
+  graphPath: string,
+  graphType: GraphData['metadata']['type']
+): boolean {
+  const visualStatePath = resolveVisualStateFilePath(graphPath, graphType);
+  return !!visualStatePath && normalizePath(filePath) === normalizePath(visualStatePath);
+}
+
+function loadPersistedVisualState(graph: GraphData): PersistedVisualState | undefined {
+  const graphPath = graph.metadata.path;
+  if (!graphPath) {
+    return undefined;
+  }
+
+  const filePath = resolveVisualStateFilePath(graphPath, graph.metadata.type);
+  if (!filePath || !fs.existsSync(filePath)) {
+    return undefined;
+  }
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+      graphs?: Record<string, PersistedVisualState>;
+    };
+    const state = raw.graphs?.[visualStateKey(graphPath, graph.metadata.type)];
+    return state || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function savePersistedVisualState(
+  graphPath: string,
+  graphType: GraphData['metadata']['type'],
+  state: PersistedVisualState
+): void {
+  const filePath = resolveVisualStateFilePath(graphPath, graphType);
+  if (!filePath) {
+    return;
+  }
+
+  const payload: {
+    version: number;
+    graphs: Record<string, PersistedVisualState>;
+  } = fs.existsSync(filePath)
+    ? (() => {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+            version?: number;
+            graphs?: Record<string, PersistedVisualState>;
+          };
+          return {
+            version: typeof parsed.version === 'number' ? parsed.version : 1,
+            graphs: parsed.graphs || {},
+          };
+        } catch {
+          return { version: 1, graphs: {} };
+        }
+      })()
+    : { version: 1, graphs: {} };
+
+  const graphKey = visualStateKey(graphPath, graphType);
+  const previousState = payload.graphs[graphKey];
+  const comparablePrevious = previousState
+    ? {
+        ...previousState,
+        savedAt: undefined,
+      }
+    : undefined;
+  const comparableNext = {
+    ...state,
+    graphPath,
+    graphType,
+    savedAt: undefined,
+  };
+
+  if (
+    comparablePrevious &&
+    JSON.stringify(comparablePrevious) === JSON.stringify(comparableNext)
+  ) {
+    return;
+  }
+
+  payload.graphs[graphKey] = {
+    ...state,
+    graphPath,
+    graphType,
+    savedAt: Date.now(),
+  };
+
+  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 }
 
 function mergeGraphChangeEvents(

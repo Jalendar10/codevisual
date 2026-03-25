@@ -743,7 +743,7 @@ export class CodeAnalyzer {
 
       const fileId = this.fileNodeId(parsed.path);
       const fileDepth = directory === '.' ? 1 : directory.split(path.sep).length + 1;
-      nodes.set(fileId, this.createFileNode(parsed, parent.id, fileDepth, fileDepth < 3));
+      nodes.set(fileId, this.createFileNode(parsed, parent.id, fileDepth, false));
       this.addEdge(edges, this.containsEdge(parent.id, fileId, 'contains'));
 
       for (const symbol of parsed.symbols) {
@@ -762,10 +762,6 @@ export class CodeAnalyzer {
 
     const showImports = vscode.workspace.getConfiguration('codeflow').get<boolean>('showImports', true);
     if (showImports) {
-      // All external packages are grouped under a single collapsed "Packages" container
-      // to avoid cluttering the canvas with dozens of scattered package nodes.
-      const PKG_CONTAINER_ID = 'pkg-container:__all__';
-
       for (const parsed of files) {
         for (const imp of parsed.imports) {
           const target = this.resolveImport(imp, parsed.path, fileIndex);
@@ -780,65 +776,7 @@ export class CodeAnalyzer {
                 imp.specifiers.join(', ')
               )
             );
-            continue;
           }
-
-          // Ensure the packages container node exists (created lazily on first external import)
-          if (!nodes.has(PKG_CONTAINER_ID)) {
-            nodes.set(PKG_CONTAINER_ID, {
-              id: PKG_CONTAINER_ID,
-              type: 'folder',
-              position: { x: 0, y: 0 },
-              style: this.nodeStyle('folder', 1, undefined, 0),
-              data: {
-                label: 'Packages',
-                kind: 'folder',
-                filePath: '',
-                relativePath: 'external packages',
-                parentId: undefined,
-                depth: 1,
-                expandable: true,
-                expanded: false, // collapsed by default — keeps graph clean
-                searchText: 'packages external dependencies',
-              },
-            });
-          }
-
-          const externalId = this.externalImportNodeId(imp.source);
-          if (!nodes.has(externalId)) {
-            nodes.set(externalId, {
-              id: externalId,
-              type: 'external',
-              position: { x: 0, y: 0 },
-              style: this.nodeStyle('external', 2, undefined, 0),
-              data: {
-                label: imp.source,
-                kind: 'package',
-                relativePath: imp.source,
-                external: true,
-                expandable: false,
-                expanded: true,
-                // Child of the packages container so it hides when the container is collapsed
-                parentId: PKG_CONTAINER_ID,
-                packageRefs: this.buildPackageReferences(parsed.language, [imp], []),
-                searchText: `${imp.source} ${imp.specifiers.join(' ')}`,
-              },
-            });
-            // Contains edge so the container counts and hides its children correctly
-            this.addEdge(edges, this.containsEdge(PKG_CONTAINER_ID, externalId, 'contains'));
-          }
-
-          // Import edge: file → individual package (hidden when container is collapsed)
-          this.addEdge(
-            edges,
-            this.linkEdge(
-              `import:${parsed.path}:${externalId}`,
-              this.fileNodeId(parsed.path),
-              externalId,
-              'import',
-              imp.specifiers.join(', ')
-            )
-          );
         }
       }
     }
@@ -880,7 +818,7 @@ export class CodeAnalyzer {
   ): GraphData {
     const nodes = new Map<string, GraphNode>();
     const edges = new Map<string, GraphEdge>();
-    const rootNode = this.createFileNode(parsed, undefined, 0, true);
+    const rootNode = this.createFileNode(parsed, undefined, 0, false);
     nodes.set(rootNode.id, rootNode);
 
     const symbolIndex = new Map<string, GraphNode>();
@@ -966,11 +904,14 @@ export class CodeAnalyzer {
 
     for (const imp of parsed.imports) {
       const resolved = this.resolveImport(imp, parsed.path, fileIndex);
-      const nodeId = resolved ? this.fileNodeId(resolved) : `module:${parsed.path}:${imp.source}`;
+      if (!resolved) {
+        continue;
+      }
+      const nodeId = this.fileNodeId(resolved);
 
       if (!nodes.has(nodeId)) {
-        const label = resolved ? path.basename(resolved) : imp.source;
-        const nodeType: GraphNodeType = resolved ? 'module' : 'external';
+        const label = path.basename(resolved);
+        const nodeType: GraphNodeType = 'module';
         nodes.set(
           nodeId,
           {
@@ -980,18 +921,15 @@ export class CodeAnalyzer {
             style: this.nodeStyle(nodeType, 1, undefined, 0),
             data: {
               label,
-              kind: resolved ? 'module' : 'package',
+              kind: 'module',
               filePath: resolved,
-              relativePath: resolved ? path.relative(this.rootPath, resolved) : imp.source,
-              language: resolved ? ParserFactory.detectLanguage(resolved) : undefined,
+              relativePath: path.relative(this.rootPath, resolved),
+              language: ParserFactory.detectLanguage(resolved),
               parentId: rootId,
               depth: 1,
-              external: !resolved,
+              external: false,
               expandable: false,
               expanded: true,
-              packageRefs: resolved
-                ? undefined
-                : this.buildPackageReferences(parsed.language, [imp], []),
               searchText: `${label} ${imp.source}`,
             },
           }
@@ -1038,26 +976,7 @@ export class CodeAnalyzer {
           targetId = matches[0];
           targetType = symbolIndex.get(targetId)?.type || 'external';
         } else {
-          targetId = `external:${dependency}`;
-          if (!nodes.has(targetId)) {
-            nodes.set(
-              targetId,
-              {
-                id: targetId,
-                type: 'external',
-                position: { x: 0, y: 0 },
-                style: this.nodeStyle('external', 1, undefined, 0),
-                data: {
-                  label: dependency,
-                  kind: 'type',
-                  external: true,
-                  expandable: false,
-                  expanded: true,
-                  searchText: dependency,
-                },
-              }
-            );
-          }
+          continue;
         }
 
         const edgeType =
@@ -1205,12 +1124,15 @@ export class CodeAnalyzer {
     parsed: ParsedFile,
     parentId?: string,
     depth = 0,
-    expanded = true
+    expanded = false
   ): GraphNode {
     const flattenedMembers = this.flattenSymbols(parsed.symbols);
     const topLevelMembers = parsed.symbols.filter((symbol) =>
       ['function', 'method', 'hook', 'component', 'route', 'test', 'testSuite'].includes(symbol.kind)
     );
+    const memberDetails = topLevelMembers
+      .map((symbol) => this.buildMethodSummary(symbol))
+      .slice(0, 10);
     // In folder-fast mode symbols[] is empty; use quick regex data stored by parseFileFast.
     type FastParsed = ParsedFile & { _quickClassCount?: number; _quickMethodCount?: number; _quickClassSummaries?: GraphClassSummary[] };
     const quickParsed = parsed as FastParsed;
@@ -1284,6 +1206,7 @@ export class CodeAnalyzer {
         memberNames: topLevelMembers
           .map((symbol) => this.simpleName(symbol.name))
           .slice(0, 4),
+        memberDetails,
         classSummaries,
         packageRefs: parsed.packageReferences.slice(0, 10),
         dataMappings: parsed.dataMappings.slice(0, 12),
@@ -1293,7 +1216,10 @@ export class CodeAnalyzer {
         testStatus: parsed.testFile && testCount > 0 ? 'unknown' : undefined,
         parentId,
         depth,
-        expandable: parsed.symbols.length > 0,
+        expandable:
+          parsed.symbols.length > 0
+          || parsed.dataMappings.length > 0
+          || parsed.packageReferences.length > 0,
         expanded,
         searchText: `${parsed.name} ${parsed.relativePath} ${parsed.language} ${parsed.packageReferences
           .map((reference) => reference.name)
@@ -1307,6 +1233,10 @@ export class CodeAnalyzer {
   private createSymbolNode(symbol: CodeSymbol, parentId: string, depth: number): GraphNode {
     const nodeType = this.mapSymbolToNodeType(symbol.kind);
     const flattenedChildren = this.flattenSymbols(symbol.children);
+    const memberDetails = flattenedChildren
+      .filter((child) => ['method', 'function', 'test', 'hook', 'component', 'route'].includes(child.kind))
+      .map((child) => this.buildMethodSummary(child))
+      .slice(0, 8);
     const estimatedWidth = Math.min(
       520,
       Math.max(
@@ -1353,6 +1283,7 @@ export class CodeAnalyzer {
           .filter((child) => ['method', 'function', 'test', 'hook', 'component', 'route'].includes(child.kind))
           .map((child) => this.simpleName(child.name))
           .slice(0, 6),
+        memberDetails,
         classSummaries:
           nodeType === 'class' || nodeType === 'interface' || nodeType === 'type'
             ? [
@@ -1369,8 +1300,14 @@ export class CodeAnalyzer {
         testStatus: nodeType === 'test' ? 'unknown' : undefined,
         parentId,
         depth,
-        expandable: symbol.children.length > 0,
-        expanded: depth < 3,
+        expandable:
+          symbol.children.length > 0
+          || (symbol.dataMappings?.length || 0) > 0
+          || (
+            (nodeType === 'class' || nodeType === 'interface' || nodeType === 'type')
+            && symbol.children.length > 0
+          ),
+        expanded: false,
         searchText: `${symbol.name} ${symbol.kind} ${symbol.returnType || ''} ${symbol.docComment || ''}`,
       },
     };
@@ -1660,6 +1597,7 @@ export class CodeAnalyzer {
     );
 
     return {
+      nodeId: symbol.id,
       name: symbol.name,
       kind:
         symbol.kind === 'enum'
@@ -1688,6 +1626,7 @@ export class CodeAnalyzer {
       .map((mapping) => this.mappingSourceDisplay(mapping));
 
     return {
+      nodeId: symbol.id,
       name: this.simpleName(symbol.name),
       kind:
         symbol.kind === 'test'
