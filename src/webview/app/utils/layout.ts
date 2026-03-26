@@ -320,7 +320,10 @@ function resolveOverlaps<T extends Record<string, unknown>>(
     position: { ...node.position },
   }));
 
-  for (let pass = 0; pass < 4; pass += 1) {
+  const maxPasses = adjusted.length > 120 ? 6 : 10;
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let moved = false;
     const sorted = [...adjusted].sort((left, right) =>
       left.position.x === right.position.x
         ? left.position.y - right.position.y
@@ -346,15 +349,23 @@ function resolveOverlaps<T extends Record<string, unknown>>(
         }
 
         if (direction === 'LR') {
-          const pushDownBy =
-            current.position.y + currentSize.height + LAYOUT_GAP - next.position.y;
-          next.position.y += Math.max(pushDownBy, LAYOUT_GAP);
+          const nextY = current.position.y + currentSize.height + LAYOUT_GAP;
+          if (next.position.y < nextY) {
+            next.position.y = nextY;
+            moved = true;
+          }
         } else {
-          const pushRightBy =
-            current.position.x + currentSize.width + LAYOUT_GAP - next.position.x;
-          next.position.x += Math.max(pushRightBy, LAYOUT_GAP);
+          const nextX = current.position.x + currentSize.width + LAYOUT_GAP;
+          if (next.position.x < nextX) {
+            next.position.x = nextX;
+            moved = true;
+          }
         }
       }
+    }
+
+    if (!moved) {
+      break;
     }
   }
 

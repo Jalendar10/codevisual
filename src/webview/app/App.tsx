@@ -45,6 +45,7 @@ type FlowEdge = Edge;
 type ActiveTab = 'visual' | 'settings';
 type StatusTone = 'info' | 'success' | 'warning' | 'error';
 type HeatOverlayMode = 'none' | 'complexity' | 'hotspot';
+type MeasuredNodeSize = { width: number; height: number };
 
 const nodeTypes = {
   folder: FolderNode,
@@ -99,6 +100,7 @@ export default function App() {
   const [rawEdges, setRawEdges] = useState<GraphEdge[]>(state?.graphData?.edges ?? []);
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
+  const [measuredNodeSizes, setMeasuredNodeSizes] = useState<Record<string, MeasuredNodeSize>>({});
   const [layout, setLayout] = useState<GraphLayoutAlgorithm>(
     state?.layout || 'hierarchical'
   );
@@ -202,6 +204,7 @@ export default function App() {
           setGraph(nextGraph);
           setRawNodes(nextGraph.nodes);
           setRawEdges(nextGraph.edges);
+          setMeasuredNodeSizes({});
           setSelectedNodeId(preservedSelection);
           setAiAnalysisCache(nextAiCache);
           setCodePreview(null);
@@ -481,6 +484,13 @@ export default function App() {
   );
 
   useEffect(() => {
+    const nextMeasuredSizes = collectMeasuredNodeSizes(nodes);
+    setMeasuredNodeSizes((current) =>
+      areMeasuredNodeSizesEqual(current, nextMeasuredSizes) ? current : nextMeasuredSizes
+    );
+  }, [nodes]);
+
+  useEffect(() => {
     const rendered = buildRenderableGraph(
       rawNodes,
       rawEdges,
@@ -494,9 +504,10 @@ export default function App() {
       overlayMode,
       toggleNodeExpansion,
       inspectSymbolFlow,
-      layoutCacheRef
+      layoutCacheRef,
+      measuredNodeSizes
     );
-    setNodes(rendered.nodes);
+    setNodes((current) => mergeMeasuredNodeMetadata(rendered.nodes, current));
     setEdges(rendered.edges);
 
     // Only fitView when a graph-load or layout-change explicitly requested it.
@@ -526,6 +537,7 @@ export default function App() {
     overlayMode,
     toggleNodeExpansion,
     inspectSymbolFlow,
+    measuredNodeSizes,
     instance,
     setEdges,
     setNodes,
@@ -2105,7 +2117,8 @@ function buildRenderableGraph(
   layoutCacheRef: React.MutableRefObject<{
     key: string;
     positions: Map<string, { x: number; y: number }>;
-  } | null>
+  } | null>,
+  measuredNodeSizes: Record<string, MeasuredNodeSize>
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const nodeMap = new Map(rawNodes.map((node) => [node.id, node]));
   const loweredQuery = searchQuery.trim().toLowerCase();
@@ -2140,7 +2153,13 @@ function buildRenderableGraph(
   const visibleEdges = rawEdges
     .filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target))
     .filter((edge) => matchesEdgeVisibility(edge.type, visibility));
-  const layoutKey = createLayoutCacheKey(visibleNodes, visibleEdges, visibility, layout);
+  const layoutKey = createLayoutCacheKey(
+    visibleNodes,
+    visibleEdges,
+    visibility,
+    layout,
+    measuredNodeSizes
+  );
   let layoutPositions = layoutCacheRef.current?.key === layoutKey
     ? layoutCacheRef.current.positions
     : undefined;
@@ -2153,7 +2172,7 @@ function buildRenderableGraph(
       data: node.data,
       draggable: true,
       selectable: true,
-      style: displayNodeStyle(node),
+      style: layoutNodeStyle(node, measuredNodeSizes[node.id]),
     }));
     const laidOutNodes = applyLayout(layoutSeedNodes, visibleEdges, layout);
     layoutPositions = new Map(
@@ -2271,7 +2290,8 @@ function createLayoutCacheKey(
   nodes: GraphNode[],
   edges: GraphEdge[],
   visibility: typeof defaultVisibility,
-  layout: GraphLayoutAlgorithm
+  layout: GraphLayoutAlgorithm,
+  measuredNodeSizes: Record<string, MeasuredNodeSize>
 ): string {
   const nodeKey = nodes
     .map((node) =>
@@ -2283,6 +2303,8 @@ function createLayoutCacheKey(
         node.data.expanded === false ? '0' : '1',
         String(node.style?.width || ''),
         String(node.style?.minHeight || ''),
+        String(measuredNodeSizes[node.id]?.width || ''),
+        String(measuredNodeSizes[node.id]?.height || ''),
       ].join(':')
     )
     .join('|');
@@ -2323,6 +2345,96 @@ function displayNodeStyle(node: GraphNode): Record<string, string | number> | un
     ...node.style,
     minHeight: 126,
   };
+}
+
+function layoutNodeStyle(
+  node: GraphNode,
+  measuredSize?: MeasuredNodeSize
+): Record<string, string | number> | undefined {
+  const style = displayNodeStyle(node);
+  if (!measuredSize) {
+    return style;
+  }
+
+  return {
+    ...style,
+    width: Math.max(Number(style?.width || 0), measuredSize.width),
+    minWidth: Math.max(Number(style?.minWidth || 0), measuredSize.width),
+    minHeight: Math.max(Number(style?.minHeight || 0), measuredSize.height),
+    height: measuredSize.height,
+  };
+}
+
+function collectMeasuredNodeSizes(nodes: FlowNode[]): Record<string, MeasuredNodeSize> {
+  const sizes: Record<string, MeasuredNodeSize> = {};
+
+  nodes.forEach((node) => {
+    const measured = (node as FlowNode & {
+      measured?: { width?: number; height?: number };
+    }).measured;
+    const width =
+      typeof measured?.width === 'number'
+        ? measured.width
+        : typeof node.width === 'number'
+          ? node.width
+          : 0;
+    const height =
+      typeof measured?.height === 'number'
+        ? measured.height
+        : typeof node.height === 'number'
+          ? node.height
+          : 0;
+
+    if (width > 0 && height > 0) {
+      sizes[node.id] = {
+        width: Math.ceil(width),
+        height: Math.ceil(height),
+      };
+    }
+  });
+
+  return sizes;
+}
+
+function areMeasuredNodeSizesEqual(
+  current: Record<string, MeasuredNodeSize>,
+  next: Record<string, MeasuredNodeSize>
+): boolean {
+  const currentIds = Object.keys(current);
+  const nextIds = Object.keys(next);
+  if (currentIds.length !== nextIds.length) {
+    return false;
+  }
+
+  return currentIds.every((nodeId) => {
+    const currentSize = current[nodeId];
+    const nextSize = next[nodeId];
+    return !!nextSize
+      && currentSize.width === nextSize.width
+      && currentSize.height === nextSize.height;
+  });
+}
+
+function mergeMeasuredNodeMetadata(nextNodes: FlowNode[], currentNodes: FlowNode[]): FlowNode[] {
+  const currentNodeMap = new Map(currentNodes.map((node) => [node.id, node]));
+
+  return nextNodes.map((node) => {
+    const currentNode = currentNodeMap.get(node.id);
+    if (!currentNode) {
+      return node;
+    }
+
+    const measured = (currentNode as FlowNode & {
+      measured?: { width?: number; height?: number };
+    }).measured;
+
+    return {
+      ...node,
+      width: currentNode.width,
+      height: currentNode.height,
+      measured: measured ? { ...measured } : undefined,
+    } as FlowNode;
+  });
 }
 
 function matchesNodeVisibility(

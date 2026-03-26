@@ -2,7 +2,7 @@
   "name": "codeflow-visualizer",
   "displayName": "CodeFlow Visualizer",
   "description": "Interactive node-based visualization of code structure inside VS Code.",
-  "version": "2.6.3",
+  "version": "2.6.4",
   "publisher": "codeflow",
   "engines": {
     "vscode": "^1.110.0"
