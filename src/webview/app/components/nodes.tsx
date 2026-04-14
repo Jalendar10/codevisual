@@ -270,6 +270,109 @@ function renderDataMappings(dataMappings?: DataFlowMapping[]) {
   );
 }
 
+function renderRiskSummary(data: GraphNodeData) {
+  if (!data.securityLevel && !data.dataLeakLevel) {
+    return null;
+  }
+
+  const findings = [
+    ...(data.securityFindings || []),
+    ...(data.dataLeakFindings || []),
+  ];
+
+  return (
+    <div className="cf-node__section">
+      <div className="cf-node__section-label">Risk</div>
+      <div className="cf-node__risk-row">
+        <span className={`cf-node__risk-pill is-${data.securityLevel || 'low'}`}>
+          security {String(data.securityLevel || 'low')}
+        </span>
+        <span className={`cf-node__risk-pill is-${data.dataLeakLevel || 'low'}`}>
+          leak {String(data.dataLeakLevel || 'low')}
+        </span>
+      </div>
+      {findings.length ? (
+        <div className="cf-node__risk-list">
+          {findings.slice(0, 3).map((finding, index) => (
+            <div key={`${finding}-${index}`} className="cf-node__risk-item">
+              {finding}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function renderLinkedTestSummary(data: GraphNodeData) {
+  if (!data.linkedTestRelativePath && !data.testFileCount && !data.testCaseCount && !data.testLineCount) {
+    return null;
+  }
+
+  return (
+    <div className="cf-node__section">
+      <div className="cf-node__section-label">Tests</div>
+      <div className="cf-node__test-summary">
+        {data.linkedTestRelativePath ? (
+          <div className="cf-node__test-link" title={data.linkedTestFilePath}>
+            {data.linkedTestRelativePath}
+          </div>
+        ) : null}
+        <div className="cf-node__test-stats">
+          <span>{data.testFileCount || 0} files</span>
+          <span>{data.testCaseCount || 0} cases</span>
+          <span>{data.testLineCount || 0} lines</span>
+          {typeof data.coverageEstimate === 'number' ? (
+            <span>{data.coverageEstimate}% cover</span>
+          ) : null}
+        </div>
+        {(data.coveredMethodCount || data.uncoveredMethodCount) ? (
+          <div className="cf-node__test-stats">
+            <span>{data.coveredMethodCount || 0} covered</span>
+            <span>{data.uncoveredMethodCount || 0} not covered</span>
+          </div>
+        ) : null}
+        {data.uncoveredMembers?.length ? (
+          <div className="cf-node__mapping-more">
+            uncovered: {data.uncoveredMembers.slice(0, 4).join(', ')}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function renderPinnedTestSummary(data: GraphNodeData) {
+  if (!data.linkedTestRelativePath && !data.testFileCount && !data.testCaseCount && !data.testLineCount) {
+    return null;
+  }
+
+  return (
+    <div className="cf-node__test-card">
+      <div className="cf-node__test-card-head">
+        <span className="cf-node__test-card-label">Test File</span>
+        {typeof data.coverageEstimate === 'number' ? (
+          <span className="cf-node__test-card-pill">{data.coverageEstimate}%</span>
+        ) : null}
+      </div>
+      <div className="cf-node__test-card-name" title={data.linkedTestFilePath}>
+        {data.linkedTestRelativePath || 'No linked test file yet'}
+      </div>
+      <div className="cf-node__test-card-stats">
+        <span>{data.linkedTestCaseCount || data.testCaseCount || 0} cases</span>
+        <span>{data.linkedTestLineCount || data.testLineCount || 0} lines</span>
+        <span>{data.testFileCount || 0} files</span>
+      </div>
+      {(data.coveredMethodCount || data.uncoveredMethodCount) ? (
+        <div className="cf-node__test-card-stats">
+          <span>{data.coveredMethodCount || 0} covered</span>
+          <span>{data.uncoveredMethodCount || 0} open</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function renderPackageRefs(packageRefs?: PackageReference[]) {
   if (!packageRefs?.length) {
     return null;
@@ -430,6 +533,20 @@ export function FolderNode({ id, data, selected }: NodeProps) {
       <div className="cf-node__footer">
         <span title={payload.relativePath || payload.filePath}>{shortPath(payload.relativePath || payload.filePath)}</span>
       </div>
+      <div className="cf-node__body">
+        <span>{payload.testFileCount || 0} test files</span>
+        <span>{payload.testCaseCount || 0} cases</span>
+        <span>{payload.testLineCount || 0} test lines</span>
+        {typeof payload.coverageEstimate === 'number' ? (
+          <span>{payload.coverageEstimate}% coverage</span>
+        ) : null}
+      </div>
+      {isExpanded ? (
+        <>
+          {renderLinkedTestSummary(payload)}
+          {renderRiskSummary(payload)}
+        </>
+      ) : null}
       <Handle type="source" position={Position.Right} className="cf-handle" />
     </div>
   );
@@ -482,8 +599,15 @@ export function FileNode({ id, data, selected }: NodeProps) {
           <strong>{payload.hotspotScore || 0}</strong>
         </div>
       </div>
+      {renderPinnedTestSummary(payload)}
+      <div className="cf-node__body">
+        {payload.securityLevel ? <span>security {payload.securityLevel}</span> : null}
+        {payload.dataLeakLevel ? <span>leak {payload.dataLeakLevel}</span> : null}
+      </div>
       {isExpanded ? (
         <>
+          {renderLinkedTestSummary(payload)}
+          {renderRiskSummary(payload)}
           {renderClassSections(payload)}
           {renderMemberPreview(payload)}
           {renderDataMappings(payload.dataMappings)}
@@ -527,8 +651,11 @@ export function SymbolNode({ id, data, selected, type }: NodeProps) {
         {(payload.methodCount || 0) > 0 && <span>{payload.methodCount} methods</span>}
         {(payload.testCount || 0) > 0 && <span>{payload.testCount} tests</span>}
       </div>
+      {renderPinnedTestSummary(payload)}
       {isExpanded ? (
         <>
+          {renderLinkedTestSummary(payload)}
+          {renderRiskSummary(payload)}
           {renderClassSections(payload)}
           {renderMemberPreview(payload)}
           {renderDataMappings(payload.dataMappings)}

@@ -9,6 +9,7 @@ import {
   GitWebhookSettings,
   GraphTestStatus,
   PersistedVisualState,
+  TestAgentSettings,
   TestRunSummary,
   WebviewMessage,
 } from '../types';
@@ -42,6 +43,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
   private readonly gitDataEmitter = new vscode.EventEmitter<void>();
   private readonly gitAnalysisEmitter = new vscode.EventEmitter<void>();
   private readonly gitSettingsEmitter = new vscode.EventEmitter<GitWebhookSettings>();
+  private readonly testAgentSettingsEmitter = new vscode.EventEmitter<TestAgentSettings>();
   private readonly refreshEmitter = new vscode.EventEmitter<void>();
   private readonly requestModelsEmitter = new vscode.EventEmitter<void>();
   private readonly selectModelEmitter = new vscode.EventEmitter<{ modelId: string }>();
@@ -63,6 +65,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
   readonly onDidRequestGitData = this.gitDataEmitter.event;
   readonly onDidRequestGitAnalysis = this.gitAnalysisEmitter.event;
   readonly onDidSaveGitSettings = this.gitSettingsEmitter.event;
+  readonly onDidSaveTestAgentSettings = this.testAgentSettingsEmitter.event;
   readonly onDidRequestRefresh = this.refreshEmitter.event;
   readonly onDidRequestModels = this.requestModelsEmitter.event;
   readonly onDidSelectModel = this.selectModelEmitter.event;
@@ -208,6 +211,10 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
     this.post({ type: 'gitData', commits, settings, review });
   }
 
+  showTestAgentSettings(settings: TestAgentSettings): void {
+    this.post({ type: 'testAgentSettings', settings });
+  }
+
   showModels(models: Array<{ id: string; family: string }>): void {
     this.post({ type: 'aiModels', models });
   }
@@ -237,6 +244,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
     this.gitDataEmitter.dispose();
     this.gitAnalysisEmitter.dispose();
     this.gitSettingsEmitter.dispose();
+    this.testAgentSettingsEmitter.dispose();
     this.refreshEmitter.dispose();
     this.requestModelsEmitter.dispose();
     this.selectModelEmitter.dispose();
@@ -283,6 +291,9 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
         break;
       case 'saveGitSettings':
         this.gitSettingsEmitter.fire(message.data);
+        break;
+      case 'saveTestAgentSettings':
+        this.testAgentSettingsEmitter.fire(message.data);
         break;
       case 'requestRefresh':
         this.refreshEmitter.fire();

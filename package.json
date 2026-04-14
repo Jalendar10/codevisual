@@ -2,7 +2,7 @@
   "name": "codeflow-visualizer",
   "displayName": "CodeFlow Visualizer",
   "description": "Interactive node-based visualization of code structure inside VS Code.",
-  "version": "2.6.4",
+  "version": "2.6.6",
   "publisher": "codeflow",
   "engines": {
     "vscode": "^1.110.0"
@@ -61,14 +61,19 @@
           "group": "navigation@1"
         },
         {
+          "command": "codeflow.generateTests",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@2"
+        },
+        {
           "command": "codeflow.visualizeFile",
           "when": "resourceScheme == file && !explorerResourceIsFolder",
-          "group": "navigation@2"
+          "group": "navigation@3"
         },
         {
           "command": "codeflow.generateTests",
           "when": "resourceScheme == file && !explorerResourceIsFolder",
-          "group": "navigation@3"
+          "group": "navigation@4"
         }
       ],
       "editor/context": [
@@ -186,6 +191,48 @@
           "type": "string",
           "default": "",
           "description": "Shared secret used by your GitHub or GitLab webhook relay."
+        },
+        "codeflow.testAgents.model": {
+          "type": "string",
+          "default": "inherit",
+          "description": "Model used by background test-generation agents. Use 'inherit' to reuse the main AI model."
+        },
+        "codeflow.testAgents.parallelMode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "custom"
+          ],
+          "description": "Auto runs one test agent per eligible source file. Custom uses the configured agent count."
+        },
+        "codeflow.testAgents.maxParallelAgents": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "Number of parallel Copilot-backed test agents to run when parallel mode is set to custom."
+        },
+        "codeflow.testAgents.desiredCoveragePercent": {
+          "type": "number",
+          "default": 105,
+          "minimum": 80,
+          "maximum": 200,
+          "description": "Logical coverage target used in test-generation prompts."
+        },
+        "codeflow.testAgents.skillDirectory": {
+          "type": "string",
+          "default": ".codeflow/test-agents",
+          "description": "Workspace-relative directory where default test-agent skill files are stored."
+        },
+        "codeflow.testAgents.includeSecurityScenarios": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include security-focused scenarios in generated tests."
+        },
+        "codeflow.testAgents.includeDataLeakChecks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include data-leak and sensitive-output checks in generated tests."
         }
       }
     }

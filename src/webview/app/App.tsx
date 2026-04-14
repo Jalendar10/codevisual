@@ -33,6 +33,7 @@ import {
   GitCommitSummary,
   GitWebhookSettings,
   PersistedVisualState,
+  TestAgentSettings,
   TestRunSummary,
   WebviewMessage,
 } from '../../types';
@@ -45,6 +46,7 @@ type FlowEdge = Edge;
 type ActiveTab = 'visual' | 'settings';
 type StatusTone = 'info' | 'success' | 'warning' | 'error';
 type HeatOverlayMode = 'none' | 'complexity' | 'hotspot';
+type VisualPreset = 'overview' | 'tests' | 'flow';
 type MeasuredNodeSize = { width: number; height: number };
 
 const nodeTypes = {
@@ -67,7 +69,7 @@ const defaultVisibility: GraphVisibilityState = {
   symbols: true,
   tests: true,
   modules: false,
-  imports: true,
+  imports: false,
   calls: true,
   testFlow: true,
   dataFlow: true,
@@ -101,9 +103,7 @@ export default function App() {
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
   const [measuredNodeSizes, setMeasuredNodeSizes] = useState<Record<string, MeasuredNodeSize>>({});
-  const [layout, setLayout] = useState<GraphLayoutAlgorithm>(
-    state?.layout || 'hierarchical'
-  );
+  const [layout, setLayout] = useState<GraphLayoutAlgorithm>('hierarchical');
   const [activeTab, setActiveTab] = useState<ActiveTab>(state?.activeTab || 'visual');
   const [overlayMode, setOverlayMode] = useState<HeatOverlayMode>(state?.overlayMode || 'none');
   const [visibility, setVisibility] = useState(defaultVisibility);
@@ -133,6 +133,15 @@ export default function App() {
     provider: 'github',
     webhookUrl: '',
     webhookSecret: '',
+  });
+  const [testAgentSettings, setTestAgentSettings] = useState<TestAgentSettings>({
+    model: 'inherit',
+    parallelMode: 'auto',
+    maxParallelAgents: 10,
+    desiredCoveragePercent: 105,
+    skillDirectory: '.codeflow/test-agents',
+    includeSecurityScenarios: true,
+    includeDataLeakChecks: true,
   });
   const [lastAiRequestNodeId, setLastAiRequestNodeId] = useState<string | null>(null);
   const [aiModels, setAiModels] = useState<Array<{ id: string; family: string }>>([]);
@@ -210,9 +219,9 @@ export default function App() {
           setCodePreview(null);
           setContextMenu(null);
           setMappingFocusNodeId(preservedMappingFocus);
-          setSearchQuery(visualState?.searchQuery || '');
+          setSearchQuery('');
           setVisibility(visualState?.visibility || defaultVisibility);
-          setLayout(visualState?.layout || state?.layout || 'hierarchical');
+          setLayout('hierarchical');
           setOverlayMode(visualState?.overlayMode || 'none');
           setActiveTab(visualState?.activeTab || 'visual');
           pendingViewportRef.current = visualState?.viewport || null;
@@ -303,6 +312,13 @@ export default function App() {
           setGitCommits(message.commits);
           setGitReview(message.review || null);
           setGitSettings(message.settings);
+          break;
+        case 'testAgentSettings':
+          setTestAgentSettings((current) => ({
+            ...current,
+            ...message.settings,
+            parallelMode: message.settings.parallelMode || current.parallelMode,
+          }));
           break;
         case 'status':
           setStatusMessage({ level: message.level, message: message.message });
@@ -586,6 +602,50 @@ export default function App() {
     setVisibility((current) => ({ ...current, [key]: !current[key] }));
   }, []);
 
+  const applyVisibilityPreset = useCallback((preset: VisualPreset) => {
+    if (preset === 'overview') {
+      setVisibility({
+        folders: true,
+        files: true,
+        symbols: true,
+        tests: true,
+        modules: false,
+        imports: false,
+        calls: true,
+        testFlow: true,
+        dataFlow: true,
+      });
+      return;
+    }
+
+    if (preset === 'tests') {
+      setVisibility({
+        folders: true,
+        files: true,
+        symbols: true,
+        tests: true,
+        modules: false,
+        imports: false,
+        calls: false,
+        testFlow: true,
+        dataFlow: true,
+      });
+      return;
+    }
+
+    setVisibility({
+      folders: true,
+      files: true,
+      symbols: true,
+      tests: false,
+      modules: false,
+      imports: false,
+      calls: true,
+      testFlow: false,
+      dataFlow: true,
+    });
+  }, []);
+
   const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
     (_event: MouseEvent, node: FlowNode) => {
       setSelectedNodeId(node.id);
@@ -756,7 +816,7 @@ export default function App() {
       if (!targetNode) {
         setStatusMessage({
           level: 'warning',
-          message: 'Select a class, method, or function node first.',
+          message: 'Select a folder, file, class, method, or function node first.',
         });
         return;
       }
@@ -765,7 +825,10 @@ export default function App() {
       setContextMenu(null);
       setStatusMessage({
         level: 'info',
-        message: `Generating tests for ${targetNode.data.label} with Copilot...`,
+        message:
+          targetNode.type === 'folder'
+            ? `Generating tests in parallel for ${targetNode.data.label}...`
+            : `Generating tests for ${targetNode.data.label} with Copilot...`,
       });
     },
     [analysisTargetNode, rawNodes, selectedNode, vscode]
@@ -867,6 +930,10 @@ export default function App() {
     vscode.postMessage({ type: 'saveGitSettings', data: gitSettings });
   }, [gitSettings, vscode]);
 
+  const saveTestAgentSettings = useCallback(() => {
+    vscode.postMessage({ type: 'saveTestAgentSettings', data: testAgentSettings } as any);
+  }, [testAgentSettings, vscode]);
+
   return (
     <div className="app-shell" ref={appShellRef}>
       <div className="topbar">
@@ -888,6 +955,9 @@ export default function App() {
           <span>{graph?.metadata.type || 'idle'} mode</span>
           <span>{graph?.metadata.totalFiles || 0} files</span>
           <span>{graph?.metadata.totalSymbols || 0} symbols</span>
+          <span>{graph?.metadata.totalTestFiles || 0} test files</span>
+          <span>{graph?.metadata.totalTestCases || 0} test cases</span>
+          <span>{graph?.metadata.totalTestLines || 0} test lines</span>
           <span>{graphStats.dataFlowEdges} data flows</span>
           {overlayMode !== 'none' ? <span>{overlayMode} overlay</span> : null}
           {testSummary ? (
@@ -911,27 +981,46 @@ export default function App() {
           <div className="toolbar">
             <div className="toolbar__group">
               <span className="toolbar__title">CodeFlow</span>
-              <select
-                value={layout}
-                onChange={(event) => {
-                  setLayout(event.target.value as GraphLayoutAlgorithm);
-                  fitViewTrigger.current += 1;
-                }}
-              >
-                <option value="hierarchical">Hierarchical</option>
-                <option value="force-directed">Force Directed</option>
-                <option value="radial">Radial</option>
-                <option value="tree">Tree</option>
-              </select>
-              <input
-                type="search"
-                placeholder="Search nodes"
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-              />
               <button onClick={fitView}>Fit View</button>
               <button onClick={collapseAll} title="Collapse all folders">Collapse</button>
               <button onClick={expandAll} title="Expand all folders">Expand</button>
+              <button onClick={() => vscode.postMessage({ type: 'requestRefresh' })} title="Re-analyze and refresh the graph">Refresh</button>
+              <button onClick={runTests}>Run Tests</button>
+            </div>
+            <div className="toolbar__group toolbar__group--presets">
+              <button
+                className={
+                  visibility.tests && visibility.calls && visibility.testFlow && visibility.dataFlow
+                    ? 'is-active'
+                    : ''
+                }
+                onClick={() => applyVisibilityPreset('overview')}
+                title="Balanced code and test view"
+              >
+                Overview
+              </button>
+              <button
+                className={
+                  visibility.tests && !visibility.calls && visibility.testFlow
+                    ? 'is-active'
+                    : ''
+                }
+                onClick={() => applyVisibilityPreset('tests')}
+                title="Focus on linked tests and coverage"
+              >
+                Tests
+              </button>
+              <button
+                className={
+                  !visibility.tests && visibility.calls && visibility.dataFlow
+                    ? 'is-active'
+                    : ''
+                }
+                onClick={() => applyVisibilityPreset('flow')}
+                title="Focus on code and data flow"
+              >
+                Flow
+              </button>
               <button
                 className={overlayMode === 'complexity' ? 'is-active' : ''}
                 onClick={() =>
@@ -954,66 +1043,9 @@ export default function App() {
               >
                 Hotspots
               </button>
-              <button
-                className={visibility.folders ? 'is-active' : ''}
-                onClick={() => toggleVisibility('folders')}
-              >
-                Folders
-              </button>
-              <button
-                className={visibility.files ? 'is-active' : ''}
-                onClick={() => toggleVisibility('files')}
-              >
-                Files
-              </button>
-              <button
-                className={visibility.symbols ? 'is-active' : ''}
-                onClick={() => toggleVisibility('symbols')}
-              >
-                Code
-              </button>
-              <button
-                className={visibility.tests ? 'is-active' : ''}
-                onClick={() => toggleVisibility('tests')}
-              >
-                Tests
-              </button>
-              <button
-                className={visibility.modules ? 'is-active' : ''}
-                onClick={() => toggleVisibility('modules')}
-              >
-                Dependencies
-              </button>
-              <button
-                className={visibility.imports ? 'is-active' : ''}
-                onClick={() => toggleVisibility('imports')}
-              >
-                Imports
-              </button>
-              <button
-                className={visibility.calls ? 'is-active' : ''}
-                onClick={() => toggleVisibility('calls')}
-              >
-                Calls
-              </button>
-              <button
-                className={visibility.testFlow ? 'is-active' : ''}
-                onClick={() => toggleVisibility('testFlow')}
-              >
-                Test Flow
-              </button>
-              <button
-                className={visibility.dataFlow ? 'is-active' : ''}
-                onClick={() => toggleVisibility('dataFlow')}
-              >
-                Data Flow
-              </button>
-              <button onClick={runTests}>Run Tests</button>
-              <button onClick={() => vscode.postMessage({ type: 'requestRefresh' })} title="Re-analyze and refresh the graph">Refresh</button>
             </div>
 
             <div className="toolbar__stats">
-              <button onClick={() => handleExport('json')}>JSON</button>
               <button onClick={() => handleExport('svg')}>SVG</button>
               <button onClick={() => handleExport('png')}>PNG</button>
               <button
@@ -1076,17 +1108,19 @@ export default function App() {
 
                     return (
                       <>
-                        {['class', 'method', 'function', 'file'].includes(menuNode.type || '') ? (
+                        {['folder', 'class', 'method', 'function', 'file'].includes(menuNode.type || '') ? (
                           <>
                             <button onClick={() => generateTests(contextMenu.nodeId)}>
-                              Create Tests
+                              {menuNode.type === 'folder' ? 'Create Folder Tests' : 'Create Tests'}
                             </button>
-                            <button onClick={() => { requestTestDiff(contextMenu.nodeId); setContextMenu(null); }}>
-                              Test Diff
-                            </button>
+                            {menuNode.type !== 'folder' ? (
+                              <button onClick={() => { requestTestDiff(contextMenu.nodeId); setContextMenu(null); }}>
+                                Test Diff
+                              </button>
+                            ) : null}
                           </>
                         ) : null}
-                        {menuNode.data.filePath ? (
+                        {menuNode.data.filePath && menuNode.type !== 'folder' ? (
                           <button
                             onClick={() => {
                               setSelectedNodeId(menuNode.id);
@@ -1194,6 +1228,34 @@ export default function App() {
                   <span>Hotspot</span>
                   <strong>{selectedNode.data.hotspotScore || 0}</strong>
                 </div>
+                <div>
+                  <span>Test files</span>
+                  <strong>{selectedNode.data.testFileCount || 0}</strong>
+                </div>
+                <div>
+                  <span>Test cases</span>
+                  <strong>{selectedNode.data.testCaseCount || 0}</strong>
+                </div>
+                <div>
+                  <span>Test lines</span>
+                  <strong>{selectedNode.data.testLineCount || 0}</strong>
+                </div>
+                <div>
+                  <span>Coverage</span>
+                  <strong>
+                    {typeof selectedNode.data.coverageEstimate === 'number'
+                      ? `${selectedNode.data.coverageEstimate}%`
+                      : 'n/a'}
+                  </strong>
+                </div>
+                <div>
+                  <span>Security</span>
+                  <strong>{String(selectedNode.data.securityLevel || 'n/a')}</strong>
+                </div>
+                <div>
+                  <span>Data leak</span>
+                  <strong>{String(selectedNode.data.dataLeakLevel || 'n/a')}</strong>
+                </div>
               </div>
               <div className="detail-sidebar__actions">
                 <button onClick={viewSelectedCode} disabled={!selectedNode.data.filePath}>
@@ -1201,10 +1263,12 @@ export default function App() {
                 </button>
                 <button
                   onClick={requestAiAnalysis}
-                  disabled={!aiStatus.available || !selectedNode.data.filePath}
+                  disabled={!aiStatus.available || !selectedNode.data.filePath || selectedNode.type === 'folder'}
                   title={
                     !aiStatus.available
                       ? aiStatus.message
+                      : selectedNode.type === 'folder'
+                        ? 'AI analysis is available for files and code symbols'
                       : !selectedNode.data.filePath
                         ? 'Select a file or code node'
                         : 'Analyze with GitHub Copilot'
@@ -1217,17 +1281,19 @@ export default function App() {
                   disabled={
                     !aiStatus.available ||
                     !selectedNode.data.filePath ||
-                    !['class', 'method', 'function', 'file'].includes(selectedNode.type || '')
+                    !['folder', 'class', 'method', 'function', 'file'].includes(selectedNode.type || '')
                   }
                   title={
                     !aiStatus.available
                       ? aiStatus.message
-                      : !['class', 'method', 'function', 'file'].includes(selectedNode.type || '')
-                        ? 'Select a file, class, method, or function node'
-                        : 'Generate test file with GitHub Copilot'
+                      : !['folder', 'class', 'method', 'function', 'file'].includes(selectedNode.type || '')
+                        ? 'Select a folder, file, class, method, or function node'
+                        : selectedNode.type === 'folder'
+                          ? 'Generate tests for each supported source file in this folder'
+                          : 'Generate test file with GitHub Copilot'
                   }
                 >
-                  Create Tests
+                  {selectedNode.type === 'folder' ? 'Create Folder Tests' : 'Create Tests'}
                 </button>
                 <button
                   onClick={() => requestTestDiff(selectedNode.id)}
@@ -1242,10 +1308,26 @@ export default function App() {
                 </button>
                 <button
                   onClick={runTestsForSelected}
-                  disabled={!selectedNode.data.filePath}
+                  disabled={!selectedNode.data.filePath || selectedNode.type === 'folder'}
                   title="Run tests for this file using the correct language runner"
                 >
                   Run Tests
+                </button>
+                <button
+                  onClick={() =>
+                    selectedNode.data.linkedTestFilePath
+                      ? vscode.postMessage({
+                          type: 'goToLocation',
+                          data: {
+                            filePath: selectedNode.data.linkedTestFilePath,
+                          },
+                        })
+                      : undefined
+                  }
+                  disabled={!selectedNode.data.linkedTestFilePath}
+                  title="Open the linked generated or existing test file"
+                >
+                  Open Test File
                 </button>
                 <button
                   className={mappingFocusNodeId === mappingTargetNode?.id ? 'is-active' : ''}
@@ -1254,6 +1336,46 @@ export default function App() {
                   Mapping
                 </button>
               </div>
+              {selectedNode.data.linkedTestRelativePath ? (
+                <div className="detail-sidebar__stack">
+                  <span>Linked test file</span>
+                  <strong>{selectedNode.data.linkedTestRelativePath}</strong>
+                  <p>
+                    {selectedNode.data.linkedTestCaseCount || 0} cases
+                    {' · '}
+                    {selectedNode.data.linkedTestLineCount || 0} lines
+                  </p>
+                </div>
+              ) : null}
+              {selectedNode.data.coveredMethodCount || selectedNode.data.uncoveredMethodCount ? (
+                <div className="detail-sidebar__stack">
+                  <span>Covered / Not covered</span>
+                  <strong>
+                    {selectedNode.data.coveredMethodCount || 0}
+                    {' / '}
+                    {selectedNode.data.uncoveredMethodCount || 0}
+                  </strong>
+                  {selectedNode.data.uncoveredMembers?.length ? (
+                    <p>{selectedNode.data.uncoveredMembers.slice(0, 8).join(', ')}</p>
+                  ) : null}
+                </div>
+              ) : null}
+              {selectedNode.data.securityFindings?.length || selectedNode.data.dataLeakFindings?.length ? (
+                <div className="detail-sidebar__stack">
+                  <span>Risk findings</span>
+                  <strong>
+                    {selectedNode.data.securityFindings?.length || 0} security
+                    {' · '}
+                    {selectedNode.data.dataLeakFindings?.length || 0} data leak
+                  </strong>
+                  <p>
+                    {[
+                      ...(selectedNode.data.securityFindings || []),
+                      ...(selectedNode.data.dataLeakFindings || []),
+                    ].slice(0, 4).join(' · ')}
+                  </p>
+                </div>
+              ) : null}
               {!mappingFocusNodeId &&
               (dependencyImpact.upstreamNodes.size > 0 || dependencyImpact.downstreamNodes.size > 0) ? (
                 <div className="detail-sidebar__stack">
@@ -1427,57 +1549,45 @@ export default function App() {
       ) : (
         <div className="settings-shell">
           <section className="settings-card">
-            <h3>Visualization</h3>
+            <h3>View</h3>
             <p>
-              Folder mode now renders nested folders, files, classes, methods, and tests. Click a
-              folder, file, or class node to collapse or expand it, and click a method node to load
-              file, class, and method code previews in the panel.
+              The graph now uses a fixed layout to stay stable. Use the presets below instead of
+              manual layout and search controls.
             </p>
-            <div className="settings-grid">
-              <label className="settings-field">
-                <span>Layout</span>
-                <select
-                  value={layout}
-                  onChange={(event) => setLayout(event.target.value as GraphLayoutAlgorithm)}
-                >
-                  <option value="hierarchical">Hierarchical</option>
-                  <option value="force-directed">Force Directed</option>
-                  <option value="radial">Radial</option>
-                  <option value="tree">Tree</option>
-                </select>
-              </label>
-              <label className="settings-field">
-                <span>Search</span>
-                <input
-                  type="search"
-                  placeholder="Filter graph"
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                />
-              </label>
-            </div>
-            <div className="toggle-grid">
-              {(
-                [
-                  ['folders', 'Folders'],
-                  ['files', 'Files'],
-                  ['symbols', 'Code'],
-                  ['tests', 'Tests'],
-                  ['modules', 'Dependencies'],
-                  ['imports', 'Imports'],
-                  ['calls', 'Calls'],
-                  ['testFlow', 'Test Flow'],
-                  ['dataFlow', 'Data Flow'],
-                ] as Array<[keyof typeof defaultVisibility, string]>
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  className={`toggle-chip ${visibility[key] ? 'is-active' : ''}`}
-                  onClick={() => toggleVisibility(key)}
-                >
-                  {label}
-                </button>
-              ))}
+            <div className="settings-actions">
+              <button
+                className={
+                  visibility.tests && visibility.calls && visibility.testFlow && visibility.dataFlow
+                    ? 'is-active'
+                    : ''
+                }
+                onClick={() => applyVisibilityPreset('overview')}
+              >
+                Overview
+              </button>
+              <button
+                className={
+                  visibility.tests && !visibility.calls && visibility.testFlow
+                    ? 'is-active'
+                    : ''
+                }
+                onClick={() => applyVisibilityPreset('tests')}
+              >
+                Tests
+              </button>
+              <button
+                className={
+                  !visibility.tests && visibility.calls && visibility.dataFlow
+                    ? 'is-active'
+                    : ''
+                }
+                onClick={() => applyVisibilityPreset('flow')}
+              >
+                Flow
+              </button>
+              <button onClick={fitView}>Fit View</button>
+              <button onClick={collapseAll}>Collapse</button>
+              <button onClick={expandAll}>Expand</button>
             </div>
             <div className="stats-grid">
               <div>
@@ -1499,10 +1609,6 @@ export default function App() {
               <div>
                 <span>Data Flow Edges</span>
                 <strong>{graphStats.dataFlowEdges}</strong>
-              </div>
-              <div>
-                <span>Package Nodes</span>
-                <strong>{graphStats.packageNodes}</strong>
               </div>
             </div>
           </section>
@@ -1609,6 +1715,132 @@ export default function App() {
                 </select>
               </label>
             </div>
+            <div className="settings-divider" />
+            <h3>Test Agents</h3>
+            <p>
+              Folder test generation can run in auto mode, which creates one agent per eligible
+              file, or in custom mode, where you choose the exact number of parallel agents.
+            </p>
+            <div className="settings-grid">
+              <label className="settings-field">
+                <span>Test Agent Model</span>
+                <select
+                  value={testAgentSettings.model}
+                  onChange={(event) =>
+                    setTestAgentSettings((current) => ({
+                      ...current,
+                      model: event.target.value,
+                    }))
+                  }
+                >
+                  <option value="inherit">inherit AI model</option>
+                  <option value="auto">auto</option>
+                  {aiModels.map((m) => (
+                    <option key={`test-${m.id}`} value={m.id}>
+                      {m.id} ({m.family})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-field">
+                <span>Agent Count Mode</span>
+                <select
+                  value={testAgentSettings.parallelMode}
+                  onChange={(event) =>
+                    setTestAgentSettings((current) => ({
+                      ...current,
+                      parallelMode: event.target.value as TestAgentSettings['parallelMode'],
+                    }))
+                  }
+                >
+                  <option value="auto">auto: one agent per file</option>
+                  <option value="custom">custom: choose the count</option>
+                </select>
+              </label>
+              {testAgentSettings.parallelMode === 'custom' ? (
+                <label className="settings-field">
+                  <span>Parallel Agents</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={testAgentSettings.maxParallelAgents}
+                    onChange={(event) =>
+                      setTestAgentSettings((current) => ({
+                        ...current,
+                        maxParallelAgents: Math.max(1, Number(event.target.value) || 1),
+                      }))
+                    }
+                  />
+                </label>
+              ) : (
+                <div className="settings-note-card">
+                  <span>Parallel Agents</span>
+                  <strong>Auto uses the eligible file count in the folder.</strong>
+                  <p>This removes the fixed 10-agent cap.</p>
+                </div>
+              )}
+              <label className="settings-field">
+                <span>Coverage Target</span>
+                <input
+                  type="number"
+                  min={80}
+                  max={200}
+                  value={testAgentSettings.desiredCoveragePercent}
+                  onChange={(event) =>
+                    setTestAgentSettings((current) => ({
+                      ...current,
+                      desiredCoveragePercent: Math.max(80, Math.min(200, Number(event.target.value) || 105)),
+                    }))
+                  }
+                />
+              </label>
+              <label className="settings-field">
+                <span>Skill Directory</span>
+                <input
+                  type="text"
+                  value={testAgentSettings.skillDirectory}
+                  onChange={(event) =>
+                    setTestAgentSettings((current) => ({
+                      ...current,
+                      skillDirectory: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            <div className="settings-checks">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={testAgentSettings.includeSecurityScenarios}
+                  onChange={(event) =>
+                    setTestAgentSettings((current) => ({
+                      ...current,
+                      includeSecurityScenarios: event.target.checked,
+                    }))
+                  }
+                />
+                <span>Include security scenarios</span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={testAgentSettings.includeDataLeakChecks}
+                  onChange={(event) =>
+                    setTestAgentSettings((current) => ({
+                      ...current,
+                      includeDataLeakChecks: event.target.checked,
+                    }))
+                  }
+                />
+                <span>Include data leak checks</span>
+              </label>
+            </div>
+            <div className="settings-inline-note">
+              Test files are written into conventional test folders such as `src/test`, `tests`,
+              `test`, `spec`, or `Tests`, and the graph refreshes to attach them back to the source
+              nodes.
+            </div>
             {aiModels.length === 0 && aiStatus.available && (
               <p style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>
                 Loading models… If none appear, use Command Palette → "CodeFlow: List Available Copilot Models".
@@ -1617,6 +1849,9 @@ export default function App() {
             <div className="settings-actions">
               <button onClick={requestAiAnalysis} disabled={!aiStatus.available}>
                 Analyze Selected Node
+              </button>
+              <button onClick={saveTestAgentSettings}>
+                Save Test Agent Settings
               </button>
               <button onClick={() => vscode.postMessage({ type: 'requestModels' })}>
                 Reload Models

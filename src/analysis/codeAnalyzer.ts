@@ -20,6 +20,7 @@ import {
   PackageInfo,
   PackageReference,
   ParsedFile,
+  RiskLevel,
 } from '../types';
 
 interface SelectionContext {
@@ -30,6 +31,23 @@ interface SelectionContext {
 interface FolderNodeState {
   id: string;
   path: string;
+}
+
+interface FileTestInsight {
+  testFilePath?: string;
+  testRelativePath?: string;
+  testFileCount: number;
+  testCaseCount: number;
+  testLineCount: number;
+  coverageEstimate: number;
+  coveredMethodCount: number;
+  uncoveredMethodCount: number;
+  uncoveredMembers: string[];
+  desiredCoveragePercent: number;
+  securityLevel: RiskLevel;
+  dataLeakLevel: RiskLevel;
+  securityFindings: string[];
+  dataLeakFindings: string[];
 }
 
 export class CodeAnalyzer {
@@ -692,6 +710,7 @@ export class CodeAnalyzer {
     const nodes = new Map<string, GraphNode>();
     const edges = new Map<string, GraphEdge>();
     const fileIndex = new Map(files.map((file) => [file.path, file]));
+    const fileInsights = this.buildFileInsights(files);
     const symbolIndex = new Map<string, GraphNode>();
     const symbolNameIndex = new Map<string, string[]>();
     const allSymbols: CodeSymbol[] = [];
@@ -743,7 +762,7 @@ export class CodeAnalyzer {
 
       const fileId = this.fileNodeId(parsed.path);
       const fileDepth = directory === '.' ? 1 : directory.split(path.sep).length + 1;
-      nodes.set(fileId, this.createFileNode(parsed, parent.id, fileDepth, false));
+      nodes.set(fileId, this.createFileNode(parsed, parent.id, fileDepth, false, fileInsights.get(parsed.path)));
       this.addEdge(edges, this.containsEdge(parent.id, fileId, 'contains'));
 
       for (const symbol of parsed.symbols) {
@@ -791,9 +810,12 @@ export class CodeAnalyzer {
 
     this.updateTestFlowCounts(nodes, edges);
     this.updateContainerCounts(nodes, edges);
+    this.updateFolderTestAggregates(nodes, edges);
 
     const totalLines = files.reduce((sum, file) => sum + file.lineCount, 0);
     const totalSymbols = files.reduce((sum, file) => sum + this.countSymbols(file.symbols), 0);
+    const sourceInsights = Array.from(fileInsights.entries())
+      .filter(([filePath]) => !(this.parsedFiles.get(filePath)?.testFile));
 
     return {
       nodes: Array.from(nodes.values()),
@@ -806,6 +828,11 @@ export class CodeAnalyzer {
         totalFiles: files.length,
         totalSymbols,
         totalLines,
+        totalTestFiles: sourceInsights.reduce((sum, [, insight]) => sum + insight.testFileCount, 0),
+        totalTestCases: sourceInsights.reduce((sum, [, insight]) => sum + insight.testCaseCount, 0),
+        totalTestLines: sourceInsights.reduce((sum, [, insight]) => sum + insight.testLineCount, 0),
+        totalCoveredMembers: sourceInsights.reduce((sum, [, insight]) => sum + insight.coveredMethodCount, 0),
+        totalUncoveredMembers: sourceInsights.reduce((sum, [, insight]) => sum + insight.uncoveredMethodCount, 0),
       },
     };
   }
@@ -818,7 +845,11 @@ export class CodeAnalyzer {
   ): GraphData {
     const nodes = new Map<string, GraphNode>();
     const edges = new Map<string, GraphEdge>();
-    const rootNode = this.createFileNode(parsed, undefined, 0, false);
+    const insight = this.buildFileInsight(parsed, new Set([parsed.path]), Math.max(
+      80,
+      Math.min(200, vscode.workspace.getConfiguration('codeflow').get<number>('testAgents.desiredCoveragePercent', 105))
+    ));
+    const rootNode = this.createFileNode(parsed, undefined, 0, false, insight);
     nodes.set(rootNode.id, rootNode);
 
     const symbolIndex = new Map<string, GraphNode>();
@@ -856,6 +887,11 @@ export class CodeAnalyzer {
         totalFiles: 1,
         totalSymbols: this.countSymbols(parsed.symbols),
         totalLines: parsed.lineCount,
+        totalTestFiles: insight.testFileCount,
+        totalTestCases: insight.testCaseCount,
+        totalTestLines: insight.testLineCount,
+        totalCoveredMembers: insight.coveredMethodCount,
+        totalUncoveredMembers: insight.uncoveredMethodCount,
       },
     };
   }
@@ -892,6 +928,295 @@ export class CodeAnalyzer {
         symbolNameIndex,
       });
     }
+  }
+
+  private buildFileInsights(files: ParsedFile[]): Map<string, FileTestInsight> {
+    const desiredCoveragePercent = Math.max(
+      80,
+      Math.min(200, vscode.workspace.getConfiguration('codeflow').get<number>('testAgents.desiredCoveragePercent', 105))
+    );
+    const filePaths = new Set(files.map((file) => file.path));
+    const insights = new Map<string, FileTestInsight>();
+
+    for (const parsed of files) {
+      insights.set(parsed.path, this.buildFileInsight(parsed, filePaths, desiredCoveragePercent));
+    }
+
+    return insights;
+  }
+
+  private buildFileInsight(
+    parsed: ParsedFile,
+    filePaths: Set<string>,
+    desiredCoveragePercent: number
+  ): FileTestInsight {
+    const content = fs.existsSync(parsed.path) ? fs.readFileSync(parsed.path, 'utf8') : '';
+    const riskProfile = this.analyzeRiskProfile(content);
+    const methodNames = this.collectTestableMemberNames(parsed.symbols);
+
+    if (parsed.testFile) {
+      const testCaseCount = this.countTestCases(parsed.path, content);
+      return {
+        testFilePath: parsed.path,
+        testRelativePath: parsed.relativePath,
+        testFileCount: 1,
+        testCaseCount,
+        testLineCount: parsed.lineCount,
+        coverageEstimate: 100,
+        coveredMethodCount: testCaseCount,
+        uncoveredMethodCount: 0,
+        uncoveredMembers: [],
+        desiredCoveragePercent,
+        securityLevel: riskProfile.securityLevel,
+        dataLeakLevel: riskProfile.dataLeakLevel,
+        securityFindings: riskProfile.securityFindings,
+        dataLeakFindings: riskProfile.dataLeakFindings,
+      };
+    }
+
+    const testFilePath = this.findRelatedTestFilePath(parsed.path, filePaths);
+    const testContent = testFilePath && fs.existsSync(testFilePath)
+      ? fs.readFileSync(testFilePath, 'utf8')
+      : '';
+    const linkedLineCount = testContent ? testContent.split('\n').length : 0;
+    const linkedTestCaseCount = testContent ? this.countTestCases(testFilePath!, testContent) : 0;
+    const coveredMethodNames = methodNames.filter((name) =>
+      testContent ? new RegExp(`\\b${this.escapeRegExp(name)}\\b`, 'i').test(testContent) : false
+    );
+    const uncoveredMembers = methodNames.filter((name) => !coveredMethodNames.includes(name));
+    const coverageEstimate = methodNames.length > 0
+      ? Math.round((coveredMethodNames.length / methodNames.length) * 100)
+      : (testFilePath ? 100 : 0);
+
+    return {
+      testFilePath,
+      testRelativePath: testFilePath ? path.relative(this.rootPath, testFilePath) : undefined,
+      testFileCount: testFilePath ? 1 : 0,
+      testCaseCount: linkedTestCaseCount,
+      testLineCount: linkedLineCount,
+      coverageEstimate,
+      coveredMethodCount: coveredMethodNames.length,
+      uncoveredMethodCount: uncoveredMembers.length,
+      uncoveredMembers: uncoveredMembers.slice(0, 12),
+      desiredCoveragePercent,
+      securityLevel: riskProfile.securityLevel,
+      dataLeakLevel: riskProfile.dataLeakLevel,
+      securityFindings: riskProfile.securityFindings,
+      dataLeakFindings: riskProfile.dataLeakFindings,
+    };
+  }
+
+  private findRelatedTestFilePath(sourceFilePath: string, knownPaths: Set<string>): string | undefined {
+    const ext = path.extname(sourceFilePath);
+    const dir = path.dirname(sourceFilePath);
+    const base = path.basename(sourceFilePath, ext);
+    const relativePath = path.relative(this.rootPath, sourceFilePath).replace(/\\/g, '/');
+    const relativeWithoutExt = ext && relativePath.endsWith(ext)
+      ? relativePath.slice(0, -ext.length)
+      : relativePath;
+    const relativeSegments = relativeWithoutExt.split('/').filter(Boolean);
+    const relativeDirSegments = relativeSegments.slice(0, -1);
+    const trimmedDirSegments = [...relativeDirSegments];
+    const removable = new Set(['src', 'lib', 'app', 'source', 'sources']);
+    while (trimmedDirSegments.length > 0 && removable.has(trimmedDirSegments[0].toLowerCase())) {
+      trimmedDirSegments.shift();
+    }
+    if (trimmedDirSegments[0]?.toLowerCase() === 'main') {
+      trimmedDirSegments.shift();
+    }
+    if (trimmedDirSegments[0]?.toLowerCase() === 'java' || trimmedDirSegments[0]?.toLowerCase() === 'kotlin') {
+      trimmedDirSegments.shift();
+    }
+    const snakeBase = base
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/[^a-zA-Z0-9]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .toLowerCase() || 'generated_test';
+    const pascalBase = base
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/[^a-zA-Z0-9]+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+      .join('') || 'GeneratedSpec';
+    const addRootCandidate = (segments: string[], fileName: string, bucket: string[]) => {
+      bucket.push(path.join(this.rootPath, ...segments, fileName));
+    };
+    const candidates = [
+      path.join(dir, `test_${base}${ext}`),
+      path.join(dir, `${base}_test${ext}`),
+      path.join(dir, `${base}Test${ext}`),
+      path.join(dir, `${base}Tests${ext}`),
+      path.join(dir, `${base}.test${ext}`),
+      path.join(dir, `${base}.spec${ext}`),
+      path.join(dir, '__tests__', `${base}.test${ext}`),
+      path.join(dir, '__tests__', `${base}.spec${ext}`),
+      path.join(dir, `${base}Test.generated${ext}`),
+      path.join(dir, `test_${base}.generated${ext}`),
+      path.join(dir, `${base}_spec${ext}`),
+    ];
+
+    switch (ext.toLowerCase()) {
+      case '.java': {
+        addRootCandidate(['src', 'test', 'java', ...trimmedDirSegments], `${pascalBase}Test${ext}`, candidates);
+        addRootCandidate(['src', 'test', 'java', ...trimmedDirSegments], `${pascalBase}Tests${ext}`, candidates);
+        addRootCandidate(['test', ...trimmedDirSegments], `${pascalBase}Test${ext}`, candidates);
+        addRootCandidate(['src', 'test', 'java', ...trimmedDirSegments], `${pascalBase}Test.generated${ext}`, candidates);
+        break;
+      }
+      case '.kt':
+      case '.kts': {
+        addRootCandidate(['src', 'test', 'kotlin', ...trimmedDirSegments], `${pascalBase}Test${ext}`, candidates);
+        addRootCandidate(['src', 'test', 'kotlin', ...trimmedDirSegments], `${pascalBase}Tests${ext}`, candidates);
+        addRootCandidate(['test', ...trimmedDirSegments], `${pascalBase}Test${ext}`, candidates);
+        addRootCandidate(['src', 'test', 'kotlin', ...trimmedDirSegments], `${pascalBase}Test.generated${ext}`, candidates);
+        break;
+      }
+      case '.py': {
+        addRootCandidate(['tests', ...trimmedDirSegments], `test_${snakeBase}${ext}`, candidates);
+        addRootCandidate(['tests', ...trimmedDirSegments], `${snakeBase}_test${ext}`, candidates);
+        addRootCandidate(['test', ...trimmedDirSegments], `test_${snakeBase}${ext}`, candidates);
+        addRootCandidate(['tests', ...trimmedDirSegments], `test_${snakeBase}.generated${ext}`, candidates);
+        break;
+      }
+      case '.ts':
+      case '.tsx':
+      case '.js':
+      case '.jsx': {
+        addRootCandidate(['test', ...trimmedDirSegments], `${base}.test${ext}`, candidates);
+        addRootCandidate(['test', ...trimmedDirSegments], `${base}.spec${ext}`, candidates);
+        addRootCandidate(['tests', ...trimmedDirSegments], `${base}.test${ext}`, candidates);
+        addRootCandidate(['test', ...trimmedDirSegments], `${base}.test.generated${ext}`, candidates);
+        break;
+      }
+      case '.cs': {
+        addRootCandidate(['tests', ...trimmedDirSegments], `${pascalBase}Tests${ext}`, candidates);
+        addRootCandidate(['test', ...trimmedDirSegments], `${pascalBase}Tests${ext}`, candidates);
+        break;
+      }
+      case '.php': {
+        addRootCandidate(['tests', ...trimmedDirSegments], `${pascalBase}Test${ext}`, candidates);
+        addRootCandidate(['tests', ...trimmedDirSegments], `${pascalBase}Test.generated${ext}`, candidates);
+        break;
+      }
+      case '.rb': {
+        addRootCandidate(['spec', ...trimmedDirSegments], `${snakeBase}_spec${ext}`, candidates);
+        break;
+      }
+      case '.swift': {
+        addRootCandidate(['Tests', ...trimmedDirSegments], `${pascalBase}Tests${ext}`, candidates);
+        break;
+      }
+      case '.dart': {
+        addRootCandidate(['test', ...trimmedDirSegments], `${snakeBase}_test${ext}`, candidates);
+        addRootCandidate(['test', ...trimmedDirSegments], `${snakeBase}_test.generated${ext}`, candidates);
+        break;
+      }
+      case '.rs': {
+        addRootCandidate(['tests', ...trimmedDirSegments], `${snakeBase}.rs`, candidates);
+        addRootCandidate(['tests', ...trimmedDirSegments], `${snakeBase}_test.rs`, candidates);
+        break;
+      }
+      default:
+        break;
+    }
+
+    return candidates.find((candidate) => knownPaths.has(candidate) || fs.existsSync(candidate));
+  }
+
+  private countTestCases(filePath: string, content: string): number {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.py') {
+      return (content.match(/^\s*def\s+test_[\w_]+\s*\(/gm) || []).length;
+    }
+    if (ext === '.java' || ext === '.kt' || ext === '.kts') {
+      return (content.match(/@\s*(?:Test|ParameterizedTest|RepeatedTest|TestFactory)\b/g) || []).length;
+    }
+    if (ext === '.go') {
+      return (content.match(/\bfunc\s+Test[A-Z]\w*\s*\(/g) || []).length;
+    }
+    if (ext === '.cs') {
+      return (content.match(/\[\s*(?:Fact|Theory|TestMethod|Test)\s*\]/g) || []).length;
+    }
+    if (ext === '.rb') {
+      return (content.match(/\bit\s+['"]/g) || []).length;
+    }
+    if (ext === '.swift') {
+      return (content.match(/\bfunc\s+test[A-Z]\w*\s*\(/g) || []).length;
+    }
+    if (ext === '.dart') {
+      return (content.match(/\btest\s*\(/g) || []).length;
+    }
+    return (content.match(/\b(?:it|test)\s*\(/g) || []).length;
+  }
+
+  private collectTestableMemberNames(symbols: CodeSymbol[]): string[] {
+    return Array.from(new Set(
+      this.flattenSymbols(symbols)
+        .filter((symbol) => ['method', 'function', 'hook', 'component', 'route'].includes(symbol.kind))
+        .map((symbol) => this.simpleName(symbol.name))
+        .filter(Boolean)
+    ));
+  }
+
+  private analyzeRiskProfile(content: string): {
+    securityLevel: RiskLevel;
+    dataLeakLevel: RiskLevel;
+    securityFindings: string[];
+    dataLeakFindings: string[];
+  } {
+    const securityFindings: string[] = [];
+    const dataLeakFindings: string[] = [];
+
+    const securityChecks: Array<[RegExp, string]> = [
+      [/\beval\s*\(/i, 'Dynamic code execution detected'],
+      [/\b(?:Runtime\.getRuntime\(\)\.exec|ProcessBuilder|os\.system|subprocess\.(?:Popen|run|call)|exec\s*\()/i, 'Command execution path detected'],
+      [/\b(?:SELECT|INSERT|UPDATE|DELETE)\b[\s\S]{0,120}\+/i, 'String-built SQL query detected'],
+      [/\byaml\.load\s*\(/i, 'Unsafe YAML load detected'],
+      [/\bpickle\.loads?\s*\(/i, 'Unsafe pickle usage detected'],
+      [/\binnerHTML\b/i, 'Raw HTML injection surface detected'],
+      [/\b(password|secret|token|api[_-]?key)\b[\s\S]{0,40}=/i, 'Sensitive credential handling detected'],
+    ];
+
+    const dataLeakChecks: Array<[RegExp, string]> = [
+      [/\b(?:console\.log|logger\.\w+|System\.out\.print|print)\s*\([\s\S]{0,120}\b(password|secret|token|ssn|email|dob|customer)\b/i, 'Sensitive data may be logged'],
+      [/\b(?:response|res|ctx)\.[\s\S]{0,80}\b(password|secret|token|ssn|email|customer)\b/i, 'Sensitive data may be returned to callers'],
+      [/\b(?:throw new|Exception|Error)\b[\s\S]{0,100}\b(password|secret|token|customer)\b/i, 'Sensitive data may leak through errors'],
+      [/\b(?:serialize|toJson|toJSON|jsonify)\b[\s\S]{0,100}\b(password|secret|token|ssn|customer)\b/i, 'Sensitive data serialization path detected'],
+    ];
+
+    securityChecks.forEach(([pattern, message]) => {
+      if (pattern.test(content)) {
+        securityFindings.push(message);
+      }
+    });
+    dataLeakChecks.forEach(([pattern, message]) => {
+      if (pattern.test(content)) {
+        dataLeakFindings.push(message);
+      }
+    });
+
+    return {
+      securityLevel: this.findingsToRiskLevel(securityFindings.length),
+      dataLeakLevel: this.findingsToRiskLevel(dataLeakFindings.length),
+      securityFindings: securityFindings.slice(0, 6),
+      dataLeakFindings: dataLeakFindings.slice(0, 6),
+    };
+  }
+
+  private findingsToRiskLevel(count: number): RiskLevel {
+    if (count >= 4) {
+      return 'critical';
+    }
+    if (count >= 3) {
+      return 'high';
+    }
+    if (count >= 1) {
+      return 'medium';
+    }
+    return 'low';
   }
 
   private addImportNodes(
@@ -1124,7 +1449,8 @@ export class CodeAnalyzer {
     parsed: ParsedFile,
     parentId?: string,
     depth = 0,
-    expanded = false
+    expanded = false,
+    insight?: FileTestInsight
   ): GraphNode {
     const flattenedMembers = this.flattenSymbols(parsed.symbols);
     const topLevelMembers = parsed.symbols.filter((symbol) =>
@@ -1213,6 +1539,22 @@ export class CodeAnalyzer {
         classCount,
         methodCount,
         testCount,
+        testFileCount: parsed.testFile ? 0 : (insight?.testFileCount || 0),
+        testCaseCount: insight?.testCaseCount || 0,
+        testLineCount: insight?.testLineCount || 0,
+        linkedTestFilePath: !parsed.testFile ? insight?.testFilePath : undefined,
+        linkedTestRelativePath: !parsed.testFile ? insight?.testRelativePath : undefined,
+        linkedTestCaseCount: !parsed.testFile ? insight?.testCaseCount : undefined,
+        linkedTestLineCount: !parsed.testFile ? insight?.testLineCount : undefined,
+        coverageEstimate: insight?.coverageEstimate,
+        desiredCoveragePercent: insight?.desiredCoveragePercent,
+        coveredMethodCount: insight?.coveredMethodCount,
+        uncoveredMethodCount: insight?.uncoveredMethodCount,
+        uncoveredMembers: insight?.uncoveredMembers,
+        securityLevel: insight?.securityLevel,
+        dataLeakLevel: insight?.dataLeakLevel,
+        securityFindings: insight?.securityFindings,
+        dataLeakFindings: insight?.dataLeakFindings,
         testStatus: parsed.testFile && testCount > 0 ? 'unknown' : undefined,
         parentId,
         depth,
@@ -1420,6 +1762,100 @@ export class CodeAnalyzer {
         };
       }
     }
+  }
+
+  private updateFolderTestAggregates(
+    nodes: Map<string, GraphNode>,
+    edges: Map<string, GraphEdge>
+  ): void {
+    const childrenByParent = new Map<string, string[]>();
+    for (const edge of edges.values()) {
+      if (edge.type !== 'contains') {
+        continue;
+      }
+      const children = childrenByParent.get(edge.source) || [];
+      children.push(edge.target);
+      childrenByParent.set(edge.source, children);
+    }
+
+    const aggregateNode = (nodeId: string): {
+      testFileCount: number;
+      testCaseCount: number;
+      testLineCount: number;
+      coveredMethodCount: number;
+      uncoveredMethodCount: number;
+      securityLevel: RiskLevel;
+      dataLeakLevel: RiskLevel;
+    } => {
+      const node = nodes.get(nodeId);
+      if (!node) {
+        return {
+          testFileCount: 0,
+          testCaseCount: 0,
+          testLineCount: 0,
+          coveredMethodCount: 0,
+          uncoveredMethodCount: 0,
+          securityLevel: 'low',
+          dataLeakLevel: 'low',
+        };
+      }
+
+      const direct = {
+        testFileCount:
+          node.type === 'file' && !node.data.linkedTestFilePath ? 0 : Number(node.data.testFileCount || 0),
+        testCaseCount:
+          node.type === 'file' && !node.data.linkedTestFilePath ? 0 : Number(node.data.testCaseCount || 0),
+        testLineCount:
+          node.type === 'file' && !node.data.linkedTestFilePath ? 0 : Number(node.data.testLineCount || 0),
+        coveredMethodCount: Number(node.data.coveredMethodCount || 0),
+        uncoveredMethodCount: Number(node.data.uncoveredMethodCount || 0),
+        securityLevel: (node.data.securityLevel as RiskLevel) || 'low',
+        dataLeakLevel: (node.data.dataLeakLevel as RiskLevel) || 'low',
+      };
+
+      for (const childId of childrenByParent.get(nodeId) || []) {
+        const child = aggregateNode(childId);
+        direct.testFileCount += child.testFileCount;
+        direct.testCaseCount += child.testCaseCount;
+        direct.testLineCount += child.testLineCount;
+        direct.coveredMethodCount += child.coveredMethodCount;
+        direct.uncoveredMethodCount += child.uncoveredMethodCount;
+        direct.securityLevel = this.maxRiskLevel(direct.securityLevel, child.securityLevel);
+        direct.dataLeakLevel = this.maxRiskLevel(direct.dataLeakLevel, child.dataLeakLevel);
+      }
+
+      if (node.type === 'folder') {
+        node.data.testFileCount = direct.testFileCount;
+        node.data.testCaseCount = direct.testCaseCount;
+        node.data.testLineCount = direct.testLineCount;
+        node.data.coveredMethodCount = direct.coveredMethodCount;
+        node.data.uncoveredMethodCount = direct.uncoveredMethodCount;
+        const totalMembers = direct.coveredMethodCount + direct.uncoveredMethodCount;
+        node.data.coverageEstimate = totalMembers > 0
+          ? Math.round((direct.coveredMethodCount / totalMembers) * 100)
+          : 0;
+        node.data.securityLevel = direct.securityLevel;
+        node.data.dataLeakLevel = direct.dataLeakLevel;
+      }
+
+      return direct;
+    };
+
+    for (const node of nodes.values()) {
+      if (node.type === 'folder' && !node.data.parentId) {
+        aggregateNode(node.id);
+      }
+    }
+  }
+
+  private maxRiskLevel(current: RiskLevel, next: RiskLevel): RiskLevel {
+    const rank: Record<RiskLevel, number> = {
+      low: 0,
+      medium: 1,
+      high: 2,
+      critical: 3,
+    };
+    return rank[next] > rank[current] ? next : current;
   }
 
   private resolveImport(

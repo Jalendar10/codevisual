@@ -116,6 +116,11 @@ body {
   flex-wrap: wrap;
 }
 
+.toolbar__group--presets {
+  padding-left: 6px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 .toolbar__title {
   font-size: 13px;
   letter-spacing: 0.08em;
@@ -967,6 +972,95 @@ body {
   padding-top: 2px;
 }
 
+.cf-node__risk-row,
+.cf-node__test-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cf-node__risk-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.cf-node__risk-pill.is-medium {
+  background: rgba(246, 211, 101, 0.18);
+  color: #f6d365;
+}
+
+.cf-node__risk-pill.is-high,
+.cf-node__risk-pill.is-critical {
+  background: rgba(240, 106, 95, 0.18);
+  color: #f06a5f;
+}
+
+.cf-node__risk-list,
+.cf-node__test-summary {
+  display: grid;
+  gap: 6px;
+}
+
+.cf-node__test-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(77, 215, 209, 0.08);
+  border: 1px solid rgba(77, 215, 209, 0.2);
+}
+
+.cf-node__test-card-head,
+.cf-node__test-card-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cf-node__test-card-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(247, 251, 255, 0.62);
+}
+
+.cf-node__test-card-pill {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(246, 211, 101, 0.18);
+  color: #f6d365;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.cf-node__test-card-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(247, 251, 255, 0.92);
+  overflow-wrap: anywhere;
+}
+
+.cf-node__test-card-stats span {
+  font-size: 10px;
+  color: rgba(247, 251, 255, 0.76);
+}
+
+.cf-node__risk-item,
+.cf-node__test-link {
+  font-size: 10px;
+  line-height: 1.4;
+  color: rgba(247, 251, 255, 0.74);
+  overflow-wrap: anywhere;
+}
+
 .cf-node__members {
   display: flex;
   flex-wrap: wrap;
@@ -1236,6 +1330,12 @@ body {
   margin-top: 14px;
 }
 
+.settings-divider {
+  height: 1px;
+  margin: 14px 0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .settings-field {
   display: grid;
   gap: 8px;
@@ -1258,11 +1358,52 @@ body {
 
 .toggle-grid,
 .settings-actions,
-.status-pill-row {
+.status-pill-row,
+.settings-checks {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
   margin-top: 14px;
+}
+
+.settings-checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: rgba(247, 251, 255, 0.82);
+}
+
+.settings-note-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(77, 215, 209, 0.16);
+  background: rgba(77, 215, 209, 0.08);
+}
+
+.settings-note-card span,
+.settings-inline-note {
+  color: var(--panel-muted);
+  font-size: 12px;
+}
+
+.settings-note-card strong {
+  font-size: 13px;
+}
+
+.settings-note-card p,
+.settings-inline-note {
+  margin: 0;
+}
+
+.settings-inline-note {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  line-height: 1.6;
 }
 
 .toggle-chip,

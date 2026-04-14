@@ -15,6 +15,7 @@ import {
   GraphNode,
   GraphTestStatus,
   PersistedVisualState,
+  TestAgentSettings,
   TestRunSummary,
 } from './types';
 
@@ -35,6 +36,13 @@ let hotspotCache:
       scores: Record<string, number>;
     }
   | undefined;
+let extensionBasePath: string | undefined;
+
+interface GeneratedTestArtifact {
+  sourceFilePath: string;
+  testFilePath: string;
+  generatedBy: string;
+}
 
 interface GraphChangeEvent {
   paths: string[];
@@ -44,6 +52,7 @@ interface GraphChangeEvent {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  extensionBasePath = context.extensionPath;
   const aiManager = new AIProviderManager();
   webview = new CodeFlowWebviewProvider(context.extensionUri);
   const workspaceRoot = getWorkspaceRoot();
@@ -120,50 +129,32 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Right-click "Generate Test Cases" command — works from editor or explorer
     vscode.commands.registerCommand('codeflow.generateTests', async (uri?: vscode.Uri) => {
-      const filePath = uri?.fsPath || vscode.window.activeTextEditor?.document.uri.fsPath;
-      if (!filePath) {
-        vscode.window.showWarningMessage('CodeFlow: No file selected for test generation.');
+      const targetPath = uri?.fsPath || vscode.window.activeTextEditor?.document.uri.fsPath;
+      if (!targetPath) {
+        vscode.window.showWarningMessage('CodeFlow: No file or folder selected for test generation.');
         return;
       }
 
-      if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-        vscode.window.showWarningMessage('CodeFlow: Select a source file, not a folder.');
+      if (!fs.existsSync(targetPath)) {
+        vscode.window.showWarningMessage(`CodeFlow: Path not found — ${targetPath}`);
         return;
       }
 
       try {
-        const fileContent = fs.readFileSync(filePath, 'utf8');
-        const ext = path.extname(filePath).toLowerCase();
-        const language = ext === '.java' ? 'java' : ext === '.py' ? 'python' : ext === '.go' ? 'go'
-          : ext === '.ts' || ext === '.tsx' ? 'typescript' : ext === '.js' || ext === '.jsx' ? 'javascript'
-          : ext === '.kt' ? 'kotlin' : ext === '.cs' ? 'csharp' : 'unknown';
-        const framework = inferTestFramework(filePath, fileContent);
-        const root = getWorkspaceRoot(filePath) || path.dirname(filePath);
-        const relativePath = path.relative(root, filePath);
-
-        await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: 'CodeFlow: Generating test cases…', cancellable: false },
-          async () => {
-            const generated = await aiManager.generateText(
-              buildTestGenerationPrompt({
-                framework,
-                language,
-                relativePath,
-                targetLabel: path.basename(filePath, ext),
-                targetKind: 'file',
-                targetCode: fileContent.slice(0, 15000),
-              })
-            );
-
-            const testFilePath = resolveTestFilePathFromSource(filePath);
-            fs.mkdirSync(path.dirname(testFilePath), { recursive: true });
-            fs.writeFileSync(testFilePath, stripCodeFences(generated), 'utf8');
-
-            const document = await vscode.workspace.openTextDocument(testFilePath);
-            await vscode.window.showTextDocument(document, vscode.ViewColumn.Beside);
-            vscode.window.showInformationMessage(`CodeFlow: Generated tests at ${path.basename(testFilePath)}`);
-          }
-        );
+        const stats = fs.statSync(targetPath);
+        const settings = getTestAgentSettings();
+        if (stats.isDirectory()) {
+          const result = await generateTestsForFolderPath(targetPath, aiManager, settings, webview);
+          vscode.window.showInformationMessage(
+            `CodeFlow: Generated ${result.generated} test files for ${path.basename(targetPath)}${result.failed.length ? `, ${result.failed.length} failed` : ''}.`
+          );
+        } else {
+          const artifact = await generateTestsForSourceFile(targetPath, aiManager, settings);
+          const document = await vscode.workspace.openTextDocument(artifact.testFilePath);
+          await vscode.window.showTextDocument(document, vscode.ViewColumn.Beside);
+          vscode.window.showInformationMessage(`CodeFlow: Generated tests at ${path.basename(artifact.testFilePath)}`);
+        }
+        await refreshGraphFromCurrentState();
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Test generation failed.';
         vscode.window.showErrorMessage(`CodeFlow: ${message}`);
@@ -318,45 +309,33 @@ export function activate(context: vscode.ExtensionContext) {
     try {
       const node = findNode(nodeId);
       if (!node?.data.filePath) {
-        throw new Error('Select a class, method, or function node first.');
+        throw new Error('Select a folder, file, class, method, or function node first.');
       }
 
-      if (!['class', 'method', 'function', 'file'].includes(node.type)) {
-        throw new Error('Select a file, class, method, or function node to generate tests.');
+      if (!['folder', 'class', 'method', 'function', 'file'].includes(node.type)) {
+        throw new Error('Select a folder, file, class, method, or function node to generate tests.');
       }
 
       const filePath = node.data.filePath;
-      if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-        throw new Error('CodeFlow can only generate tests for source files.');
+      if (!fs.existsSync(filePath)) {
+        throw new Error('Selected path does not exist.');
       }
 
-      const fileContent = fs.readFileSync(filePath, 'utf8');
-      const classNode = findAncestorByType(node, ['class', 'interface', 'type']);
-      const targetCode = extractNodeContent(node, fileContent);
-      const classCode =
-        classNode && classNode.id !== node.id ? extractNodeContent(classNode, fileContent) : undefined;
-      const framework = inferTestFramework(filePath, fileContent);
-      const generated = await aiManager.generateText(
-        buildTestGenerationPrompt({
-          framework,
-          language: String(node.data.language || ''),
-          relativePath: path.relative(getWorkspaceRoot(filePath) || path.dirname(filePath), filePath),
-          targetLabel: String(node.data.label),
-          targetKind: String(node.data.kind || node.type),
-          classLabel: classNode ? String(classNode.data.label) : undefined,
-          targetCode,
-          classCode,
-        })
-      );
+      const settings = getTestAgentSettings();
+      if (fs.statSync(filePath).isDirectory() || node.type === 'folder') {
+        const result = await generateTestsForFolderPath(filePath, aiManager, settings, webview);
+        webview?.showStatus(
+          result.failed.length > 0 ? 'warning' : 'success',
+          `Generated ${result.generated} folder test files${result.failed.length ? `, ${result.failed.length} failed` : ''}.`
+        );
+      } else {
+        const artifact = await generateTestsForGraphNode(node, aiManager, settings);
+        const document = await vscode.workspace.openTextDocument(artifact.testFilePath);
+        await vscode.window.showTextDocument(document, vscode.ViewColumn.Beside);
+        webview?.showStatus('success', `Generated tests at ${path.basename(artifact.testFilePath)} via ${artifact.generatedBy}.`);
+      }
 
-      const testFilePath = resolveTestFilePath(node, filePath);
-      fs.mkdirSync(path.dirname(testFilePath), { recursive: true });
-      fs.writeFileSync(testFilePath, stripCodeFences(generated), 'utf8');
-
-      const document = await vscode.workspace.openTextDocument(testFilePath);
-      await vscode.window.showTextDocument(document, vscode.ViewColumn.Beside);
       await refreshGraphFromCurrentState();
-      webview?.showStatus('success', `Generated tests at ${path.basename(testFilePath)}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Test generation failed.';
       webview?.showError(message);
@@ -399,6 +378,29 @@ export function activate(context: vscode.ExtensionContext) {
       'success',
       `Saved ${settings.provider} webhook settings. Use this with your GitHub or GitLab webhook relay.`
     );
+  });
+
+  webview.onDidSaveTestAgentSettings(async (settings) => {
+    const config = vscode.workspace.getConfiguration('codeflow');
+    await config.update('testAgents.model', settings.model, vscode.ConfigurationTarget.Global);
+    await config.update('testAgents.parallelMode', settings.parallelMode, vscode.ConfigurationTarget.Global);
+    await config.update('testAgents.maxParallelAgents', settings.maxParallelAgents, vscode.ConfigurationTarget.Global);
+    await config.update('testAgents.desiredCoveragePercent', settings.desiredCoveragePercent, vscode.ConfigurationTarget.Global);
+    await config.update('testAgents.skillDirectory', settings.skillDirectory, vscode.ConfigurationTarget.Workspace);
+    await config.update('testAgents.includeSecurityScenarios', settings.includeSecurityScenarios, vscode.ConfigurationTarget.Workspace);
+    await config.update('testAgents.includeDataLeakChecks', settings.includeDataLeakChecks, vscode.ConfigurationTarget.Workspace);
+
+    const normalized = getTestAgentSettings();
+    const root = getWorkspaceRoot(currentGraph?.metadata.path);
+    if (root) {
+      await ensureAgentSkillFiles(
+        root,
+        normalized,
+        normalized.parallelMode === 'custom' ? normalized.maxParallelAgents : 1
+      );
+    }
+    webview?.showTestAgentSettings(normalized);
+    webview?.showStatus('success', 'Saved test agent settings.');
   });
 
   // Refresh graph from the webview's refresh button
@@ -790,6 +792,7 @@ async function renderGraph(
     const visualState = loadPersistedVisualState(currentGraph);
     configureGraphWatcher();
     webview?.updateGraph(currentGraph, visualState);
+    webview?.showTestAgentSettings(getTestAgentSettings());
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown error while generating graph.';
@@ -1332,17 +1335,339 @@ async function getHotspotScores(workspaceRoot: string): Promise<Record<string, n
   return scores;
 }
 
+function getTestAgentSettings(): TestAgentSettings {
+  const config = vscode.workspace.getConfiguration('codeflow');
+  return {
+    model: config.get<string>('testAgents.model', 'inherit') || 'inherit',
+    parallelMode: config.get<'auto' | 'custom'>('testAgents.parallelMode', 'auto') || 'auto',
+    maxParallelAgents: Math.max(1, config.get<number>('testAgents.maxParallelAgents', 10)),
+    desiredCoveragePercent: Math.max(80, Math.min(200, config.get<number>('testAgents.desiredCoveragePercent', 105))),
+    skillDirectory: config.get<string>('testAgents.skillDirectory', '.codeflow/test-agents') || '.codeflow/test-agents',
+    includeSecurityScenarios: config.get<boolean>('testAgents.includeSecurityScenarios', true),
+    includeDataLeakChecks: config.get<boolean>('testAgents.includeDataLeakChecks', true),
+  };
+}
+
+function resolveParallelAgentCount(settings: TestAgentSettings, eligibleFileCount: number): number {
+  if (eligibleFileCount <= 0) {
+    return 0;
+  }
+
+  if (settings.parallelMode === 'auto') {
+    return eligibleFileCount;
+  }
+
+  return Math.max(1, Math.min(settings.maxParallelAgents, eligibleFileCount));
+}
+
+function resolveTestAgentModelPreference(settings: TestAgentSettings): string | undefined {
+  return settings.model && settings.model !== 'inherit' ? settings.model : undefined;
+}
+
+function inferLanguageFromPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.py') return 'python';
+  if (ext === '.java') return 'java';
+  if (ext === '.go') return 'go';
+  if (ext === '.ts' || ext === '.tsx') return 'typescript';
+  if (ext === '.js' || ext === '.jsx') return 'javascript';
+  if (ext === '.kt' || ext === '.kts') return 'kotlin';
+  if (ext === '.cs') return 'csharp';
+  if (ext === '.php') return 'php';
+  if (ext === '.rb') return 'ruby';
+  if (ext === '.swift') return 'swift';
+  if (ext === '.dart') return 'dart';
+  if (ext === '.rs') return 'rust';
+  if (ext === '.c' || ext === '.cc' || ext === '.cpp' || ext === '.cxx' || ext === '.h' || ext === '.hpp') return 'cpp';
+  return 'unknown';
+}
+
+function isTestLikeFilePath(filePath: string): boolean {
+  const normalized = normalizePath(filePath).toLowerCase();
+  const base = path.basename(normalized);
+  return (
+    /(^test_|_test\.|\.test\.|\.spec\.|tests?\.cs$|test\.java$|tests\.java$|tests?\.swift$|_spec\.rb$)/.test(base)
+    || normalized.includes('/__tests__/')
+    || normalized.includes('/tests/')
+  );
+}
+
+function isTestGeneratableSourceFile(filePath: string): boolean {
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    return false;
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  if (['.txt', '.properties', '.md', '.json', '.yaml', '.yml', '.xml', '.csv', '.toml', '.ini'].includes(ext)) {
+    return false;
+  }
+
+  return !isTestLikeFilePath(filePath) && inferLanguageFromPath(filePath) !== 'unknown';
+}
+
+function isWithinFolder(filePath: string, folderPath: string): boolean {
+  const relative = path.relative(folderPath, filePath);
+  return normalizePath(filePath) === normalizePath(folderPath)
+    || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function collectEligibleSourceFiles(folderPath: string): Promise<string[]> {
+  const normalizedFolder = normalizePath(folderPath);
+  const candidatePaths =
+    currentGraph?.metadata.type === 'folder'
+    && currentGraph.metadata.path
+    && normalizePath(currentGraph.metadata.path) === normalizedFolder
+      ? currentGraph.nodes
+          .filter((node) => node.type === 'file' && typeof node.data.filePath === 'string')
+          .map((node) => node.data.filePath as string)
+      : (
+        await new CodeAnalyzer(getWorkspaceRoot(folderPath) || folderPath)
+          .analyzeFolder(folderPath)
+      ).nodes
+          .filter((node) => node.type === 'file' && typeof node.data.filePath === 'string')
+          .map((node) => node.data.filePath as string);
+
+  return Array.from(new Set(candidatePaths))
+    .filter((filePath) => isWithinFolder(filePath, folderPath))
+    .filter((filePath) => isTestGeneratableSourceFile(filePath))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+async function ensureAgentSkillFiles(
+  workspaceRoot: string,
+  settings: TestAgentSettings,
+  count: number
+): Promise<string[]> {
+  const renderedTemplate = renderTestAgentSkillTemplate(loadDefaultTestAgentSkillTemplate(), settings);
+  const skillDirectory = path.isAbsolute(settings.skillDirectory)
+    ? settings.skillDirectory
+    : path.join(workspaceRoot, settings.skillDirectory);
+  fs.mkdirSync(skillDirectory, { recursive: true });
+
+  const files: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const agentName = `agent-${String(index + 1).padStart(2, '0')}`;
+    const filePath = path.join(skillDirectory, `${agentName}.skill.md`);
+    const contents = renderedTemplate.replace(/{{agentName}}/g, agentName);
+    if (!fs.existsSync(filePath) || fs.readFileSync(filePath, 'utf8') !== contents) {
+      fs.writeFileSync(filePath, contents, 'utf8');
+    }
+    files.push(filePath);
+  }
+
+  const defaultFilePath = path.join(skillDirectory, 'default.skill.md');
+  const defaultContents = renderedTemplate.replace(/{{agentName}}/g, 'default-agent');
+  if (!fs.existsSync(defaultFilePath) || fs.readFileSync(defaultFilePath, 'utf8') !== defaultContents) {
+    fs.writeFileSync(defaultFilePath, defaultContents, 'utf8');
+  }
+
+  return files;
+}
+
+function loadDefaultTestAgentSkillTemplate(): string {
+  const templatePath = extensionBasePath
+    ? path.join(extensionBasePath, 'templates', 'test-agent-skill.md')
+    : undefined;
+  if (templatePath && fs.existsSync(templatePath)) {
+    return fs.readFileSync(templatePath, 'utf8');
+  }
+
+  return [
+    '# CodeFlow Test Agent Skill',
+    '',
+    'Agent: {{agentName}}',
+    '- Generate deterministic tests for the assigned file only.',
+    '- Push coverage to at least {{desiredCoveragePercent}}% logical scenario depth.',
+    '- Security scenarios: {{includeSecurityScenarios}}.',
+    '- Data leak checks: {{includeDataLeakChecks}}.',
+    '- Cover happy path, edge cases, failure modes, concurrency, data integrity, and regression risks.',
+    '- Call out covered and uncovered areas at the top of the generated test file.',
+  ].join('\n');
+}
+
+function renderTestAgentSkillTemplate(template: string, settings: TestAgentSettings): string {
+  return template
+    .replace(/{{desiredCoveragePercent}}/g, String(settings.desiredCoveragePercent))
+    .replace(/{{includeSecurityScenarios}}/g, settings.includeSecurityScenarios ? 'enabled' : 'disabled')
+    .replace(/{{includeDataLeakChecks}}/g, settings.includeDataLeakChecks ? 'enabled' : 'disabled');
+}
+
+async function generateTestsForSourceFile(
+  sourceFilePath: string,
+  aiManager: AIProviderManager,
+  settings: TestAgentSettings,
+  agentOverride?: { agentName?: string; skillFilePath?: string }
+): Promise<GeneratedTestArtifact> {
+  const fileContent = fs.readFileSync(sourceFilePath, 'utf8');
+  const language = inferLanguageFromPath(sourceFilePath);
+  if (language === 'unknown') {
+    throw new Error(`Unsupported source language for ${path.basename(sourceFilePath)}.`);
+  }
+
+  const framework = inferTestFramework(sourceFilePath, fileContent);
+  const root = getWorkspaceRoot(sourceFilePath) || path.dirname(sourceFilePath);
+  const skillFilePath = agentOverride?.skillFilePath || (await ensureAgentSkillFiles(root, settings, 1))[0];
+  const skillInstructions = fs.readFileSync(skillFilePath, 'utf8');
+  const ext = path.extname(sourceFilePath).toLowerCase();
+  const testFilePath = resolveTestFilePathFromSource(sourceFilePath);
+  const styleReference = findTestStyleReference(sourceFilePath);
+  const generated = await aiManager.generateText(
+    buildTestGenerationPrompt({
+      framework,
+      language,
+      relativePath: path.relative(root, sourceFilePath),
+      outputRelativePath: path.relative(root, testFilePath),
+      targetLabel: path.basename(sourceFilePath, ext),
+      targetKind: 'file',
+      targetCode: fileContent.slice(0, 15000),
+      desiredCoveragePercent: settings.desiredCoveragePercent,
+      agentName: agentOverride?.agentName || 'agent-01',
+      skillInstructions,
+      includeSecurityScenarios: settings.includeSecurityScenarios,
+      includeDataLeakChecks: settings.includeDataLeakChecks,
+      styleReferencePath: styleReference ? path.relative(root, styleReference.filePath) : undefined,
+      styleReferenceSnippet: styleReference?.snippet,
+    }),
+    {
+      modelPreference: resolveTestAgentModelPreference(settings),
+    }
+  );
+
+  fs.mkdirSync(path.dirname(testFilePath), { recursive: true });
+  fs.writeFileSync(testFilePath, stripCodeFences(generated), 'utf8');
+
+  return {
+    sourceFilePath,
+    testFilePath,
+    generatedBy: agentOverride?.agentName || 'agent-01',
+  };
+}
+
+async function generateTestsForGraphNode(
+  node: GraphNode,
+  aiManager: AIProviderManager,
+  settings: TestAgentSettings
+): Promise<GeneratedTestArtifact> {
+  const filePath = node.data.filePath!;
+  const fileContent = fs.readFileSync(filePath, 'utf8');
+  const classNode = findAncestorByType(node, ['class', 'interface', 'type']);
+  const targetCode = extractNodeContent(node, fileContent);
+  const classCode =
+    classNode && classNode.id !== node.id ? extractNodeContent(classNode, fileContent) : undefined;
+  const framework = inferTestFramework(filePath, fileContent);
+  const root = getWorkspaceRoot(filePath) || path.dirname(filePath);
+  const skillFilePath = (await ensureAgentSkillFiles(root, settings, 1))[0];
+  const skillInstructions = fs.readFileSync(skillFilePath, 'utf8');
+  const testFilePath = resolveTestFilePath(node, filePath);
+  const styleReference = findTestStyleReference(filePath);
+  const generated = await aiManager.generateText(
+    buildTestGenerationPrompt({
+      framework,
+      language: String(node.data.language || inferLanguageFromPath(filePath)),
+      relativePath: path.relative(root, filePath),
+      outputRelativePath: path.relative(root, testFilePath),
+      targetLabel: String(node.data.label),
+      targetKind: String(node.data.kind || node.type),
+      classLabel: classNode ? String(classNode.data.label) : undefined,
+      targetCode,
+      classCode,
+      desiredCoveragePercent: settings.desiredCoveragePercent,
+      agentName: 'agent-01',
+      skillInstructions,
+      includeSecurityScenarios: settings.includeSecurityScenarios,
+      includeDataLeakChecks: settings.includeDataLeakChecks,
+      styleReferencePath: styleReference ? path.relative(root, styleReference.filePath) : undefined,
+      styleReferenceSnippet: styleReference?.snippet,
+    }),
+    {
+      modelPreference: resolveTestAgentModelPreference(settings),
+    }
+  );
+
+  fs.mkdirSync(path.dirname(testFilePath), { recursive: true });
+  fs.writeFileSync(testFilePath, stripCodeFences(generated), 'utf8');
+
+  return {
+    sourceFilePath: filePath,
+    testFilePath,
+    generatedBy: 'agent-01',
+  };
+}
+
+async function generateTestsForFolderPath(
+  folderPath: string,
+  aiManager: AIProviderManager,
+  settings: TestAgentSettings,
+  statusTarget?: CodeFlowWebviewProvider
+): Promise<{ generated: number; failed: Array<{ filePath: string; message: string }>; artifacts: GeneratedTestArtifact[] }> {
+  const eligibleFiles = await collectEligibleSourceFiles(folderPath);
+  if (eligibleFiles.length === 0) {
+    throw new Error('No supported source files were found in this folder.');
+  }
+
+  const root = getWorkspaceRoot(folderPath) || folderPath;
+  const concurrency = resolveParallelAgentCount(settings, eligibleFiles.length);
+  const skillFiles = await ensureAgentSkillFiles(root, settings, concurrency);
+  const queue = [...eligibleFiles];
+  const artifacts: GeneratedTestArtifact[] = [];
+  const failed: Array<{ filePath: string; message: string }> = [];
+
+  await Promise.all(
+    skillFiles.map((skillFilePath, index) => (async () => {
+      const agentName = `agent-${String(index + 1).padStart(2, '0')}`;
+
+      while (queue.length > 0) {
+        const sourceFilePath = queue.shift();
+        if (!sourceFilePath) {
+          break;
+        }
+
+        try {
+          statusTarget?.showStatus('info', `${agentName} generating tests for ${path.basename(sourceFilePath)}…`);
+          const artifact = await generateTestsForSourceFile(sourceFilePath, aiManager, settings, {
+            agentName,
+            skillFilePath,
+          });
+          artifacts.push(artifact);
+        } catch (error) {
+          failed.push({
+            filePath: sourceFilePath,
+            message: error instanceof Error ? error.message : 'Unknown test generation failure.',
+          });
+        }
+      }
+    })())
+  );
+
+  return { generated: artifacts.length, failed, artifacts };
+}
+
 function buildTestGenerationPrompt(args: {
   framework: string;
   language: string;
   relativePath: string;
+  outputRelativePath: string;
   targetLabel: string;
   targetKind: string;
   classLabel?: string;
   targetCode: string;
   classCode?: string;
+  desiredCoveragePercent: number;
+  agentName: string;
+  skillInstructions: string;
+  includeSecurityScenarios: boolean;
+  includeDataLeakChecks: boolean;
+  styleReferencePath?: string;
+  styleReferenceSnippet?: string;
 }): string {
-  return `Generate COMPREHENSIVE ${args.framework} test cases for this ${args.targetKind} to achieve 120%+ coverage.
+  return `You are ${args.agentName}, a dedicated CodeFlow test generation worker.
+
+Apply this skill file while generating tests:
+${args.skillInstructions}
+
+Generate COMPREHENSIVE ${args.framework} test cases for this ${args.targetKind} to achieve at least ${args.desiredCoveragePercent}% logical coverage.
+Preserve the repository's current coding style, test naming, helper structure, fixture usage, and assertion style.
+Write the test as a complete source file that will be saved at: ${args.outputRelativePath}
 
 Return ONLY the test file source code. Do not include markdown fences.
 
@@ -1397,15 +1722,29 @@ CRITICAL REQUIREMENTS — Generate ALL of the following test categories:
     - Verify method call counts and arguments
     - Test error propagation from mocked dependencies
 
-Generate at least 20-30 test methods. Use descriptive test names that explain the scenario.
+${args.includeSecurityScenarios ? `
+11. SECURITY TESTS:
+   - Authentication, authorization, and privilege-escalation attempts
+   - Injection, unsafe deserialization, command execution, SSRF, and path traversal scenarios
+   - Secret handling and sensitive log filtering` : ''}
+
+${args.includeDataLeakChecks ? `
+12. DATA LEAK TESTS:
+   - Ensure tokens, passwords, customer identifiers, and regulated data never leak through logs, errors, or API responses
+   - Verify masked/redacted output for sensitive data
+   - Assert sanitized failure payloads and exception handling` : ''}
+
+Generate at least 20-30 test methods where the target size justifies it. Use descriptive test names that explain the scenario.
+At the top of the generated file, include a short comment block naming covered areas and remaining uncovered risks.
 
 File: ${args.relativePath}
+Output test file: ${args.outputRelativePath}
 Target: ${args.targetLabel}
 Class: ${args.classLabel || 'n/a'}
 Language: ${args.language}
 Framework: ${args.framework}
 
-${args.classCode ? `Enclosing class:\n${args.classCode}\n\n` : ''}Target code:\n${args.targetCode}`;
+${args.styleReferencePath && args.styleReferenceSnippet ? `Style reference (${args.styleReferencePath}):\n${args.styleReferenceSnippet}\n\n` : ''}${args.classCode ? `Enclosing class:\n${args.classCode}\n\n` : ''}Target code:\n${args.targetCode}`;
 }
 
 function inferTestFramework(filePath: string, fileContent: string): string {
@@ -1422,6 +1761,38 @@ function inferTestFramework(filePath: string, fileContent: string): string {
     return 'Go testing';
   }
 
+  if (ext === '.kt' || ext === '.kts') {
+    return 'JUnit 5';
+  }
+
+  if (ext === '.cs') {
+    return 'xUnit';
+  }
+
+  if (ext === '.php') {
+    return 'PHPUnit';
+  }
+
+  if (ext === '.rb') {
+    return 'RSpec';
+  }
+
+  if (ext === '.swift') {
+    return 'XCTest';
+  }
+
+  if (ext === '.dart') {
+    return 'package:test';
+  }
+
+  if (ext === '.rs') {
+    return 'Rust test';
+  }
+
+  if (ext === '.c' || ext === '.cc' || ext === '.cpp' || ext === '.cxx' || ext === '.h' || ext === '.hpp') {
+    return 'GoogleTest';
+  }
+
   if (/vitest/i.test(fileContent)) {
     return 'Vitest';
   }
@@ -1431,25 +1802,272 @@ function inferTestFramework(filePath: string, fileContent: string): string {
 
 function resolveTestFilePath(node: GraphNode, sourceFilePath: string): string {
   const ext = path.extname(sourceFilePath);
-  const dir = path.dirname(sourceFilePath);
   const sourceBase = path.basename(sourceFilePath, ext);
   const targetBase = sanitizeFileSegment(String(node.data.label || sourceBase));
+  const preferred = buildTestFileCandidates(sourceFilePath, targetBase)[0];
+  return ensureUniqueFilePath(preferred);
+}
 
-  if (ext === '.py') {
-    return ensureUniqueFilePath(path.join(dir, `test_${sourceBase}.py`));
+function buildTestFileCandidates(sourceFilePath: string, targetBase?: string): string[] {
+  const workspaceRoot = getWorkspaceRoot(sourceFilePath) || path.dirname(sourceFilePath);
+  const ext = path.extname(sourceFilePath).toLowerCase();
+  const relativePath = normalizePath(path.relative(workspaceRoot, sourceFilePath));
+  const relativeWithoutExt = ext && relativePath.endsWith(ext)
+    ? relativePath.slice(0, -ext.length)
+    : relativePath;
+  const relativeSegments = relativeWithoutExt.split('/').filter(Boolean);
+  const relativeDirSegments = relativeSegments.slice(0, -1);
+  const trimmedDirSegments = trimLeadingSourceSegments(relativeDirSegments);
+  const baseName = targetBase || path.basename(sourceFilePath, ext);
+  const safeBase = sanitizeFileSegment(baseName);
+  const snakeBase = toSnakeCase(baseName);
+  const pascalBase = toPascalCase(baseName);
+  const genericTestRoot = pickExistingTestRoot(workspaceRoot, ['test', 'tests']);
+  const pythonTestRoot = pickExistingTestRoot(workspaceRoot, ['tests', 'test']);
+  const phpTestRoot = pickExistingTestRoot(workspaceRoot, ['tests', 'test']);
+  const rubyTestRoot = pickExistingTestRoot(workspaceRoot, ['spec', 'tests']);
+  const swiftTestRoot = pickExistingTestRoot(workspaceRoot, ['Tests', 'tests']);
+  const rustTestRoot = pickExistingTestRoot(workspaceRoot, ['tests', 'test']);
+  const candidates: string[] = [];
+
+  const addRelativeCandidate = (relativeCandidate: string) => {
+    const normalized = normalizePath(relativeCandidate);
+    const absolute = path.join(workspaceRoot, ...normalized.split('/').filter(Boolean));
+    if (!candidates.includes(absolute)) {
+      candidates.push(absolute);
+    }
+  };
+
+  const mappedFromSource = (
+    fromSegments: string[],
+    toSegments: string[],
+    suffix: string
+  ): string | undefined => {
+    const mapped = remapRelativePath(relativeWithoutExt, fromSegments, toSegments);
+    return mapped ? `${mapped}${suffix}` : undefined;
+  };
+
+  switch (ext) {
+    case '.java': {
+      addOptionalCandidate(addRelativeCandidate, mappedFromSource(['src', 'main', 'java'], ['src', 'test', 'java'], `Test${ext}`));
+      addOptionalCandidate(addRelativeCandidate, mappedFromSource(['src', 'main'], ['src', 'test'], `Test${ext}`));
+      addRelativeCandidate(path.posix.join('src', 'test', 'java', ...trimmedDirSegments, `${pascalBase}Test${ext}`));
+      addRelativeCandidate(path.posix.join('src', 'test', 'java', ...trimmedDirSegments, `${pascalBase}Tests${ext}`));
+      addRelativeCandidate(path.posix.join('test', ...trimmedDirSegments, `${pascalBase}Test${ext}`));
+      break;
+    }
+    case '.kt':
+    case '.kts': {
+      addOptionalCandidate(addRelativeCandidate, mappedFromSource(['src', 'main', 'kotlin'], ['src', 'test', 'kotlin'], `Test${ext}`));
+      addOptionalCandidate(addRelativeCandidate, mappedFromSource(['src', 'main'], ['src', 'test'], `Test${ext}`));
+      addRelativeCandidate(path.posix.join('src', 'test', 'kotlin', ...trimmedDirSegments, `${pascalBase}Test${ext}`));
+      addRelativeCandidate(path.posix.join('src', 'test', 'kotlin', ...trimmedDirSegments, `${pascalBase}Tests${ext}`));
+      addRelativeCandidate(path.posix.join('test', ...trimmedDirSegments, `${pascalBase}Test${ext}`));
+      break;
+    }
+    case '.py': {
+      addRelativeCandidate(path.posix.join(pythonTestRoot, ...trimmedDirSegments, `test_${snakeBase}${ext}`));
+      addRelativeCandidate(path.posix.join(pythonTestRoot, ...trimmedDirSegments, `${snakeBase}_test${ext}`));
+      addRelativeCandidate(path.posix.join(...relativeDirSegments, 'tests', `test_${snakeBase}${ext}`));
+      break;
+    }
+    case '.ts':
+    case '.tsx':
+    case '.js':
+    case '.jsx': {
+      addRelativeCandidate(path.posix.join(genericTestRoot, ...trimmedDirSegments, `${safeBase}.test${ext}`));
+      addRelativeCandidate(path.posix.join(genericTestRoot, ...trimmedDirSegments, `${safeBase}.spec${ext}`));
+      addRelativeCandidate(path.posix.join(...relativeDirSegments, '__tests__', `${safeBase}.test${ext}`));
+      addRelativeCandidate(path.posix.join(...relativeDirSegments, '__tests__', `${safeBase}.spec${ext}`));
+      break;
+    }
+    case '.go': {
+      addRelativeCandidate(path.posix.join(...relativeDirSegments, `${snakeBase}_test${ext}`));
+      addRelativeCandidate(path.posix.join(genericTestRoot, ...trimmedDirSegments, `${snakeBase}_test${ext}`));
+      break;
+    }
+    case '.cs': {
+      addRelativeCandidate(path.posix.join(genericTestRoot, ...trimmedDirSegments, `${pascalBase}Tests${ext}`));
+      addRelativeCandidate(path.posix.join(genericTestRoot, ...trimmedDirSegments, `${pascalBase}Test${ext}`));
+      break;
+    }
+    case '.php': {
+      addRelativeCandidate(path.posix.join(phpTestRoot, ...trimmedDirSegments, `${pascalBase}Test${ext}`));
+      break;
+    }
+    case '.rb': {
+      addRelativeCandidate(path.posix.join(rubyTestRoot, ...trimmedDirSegments, `${snakeBase}_spec${ext}`));
+      break;
+    }
+    case '.swift': {
+      addOptionalCandidate(addRelativeCandidate, mappedFromSource(['Sources'], ['Tests'], `Tests${ext}`));
+      addRelativeCandidate(path.posix.join(swiftTestRoot, ...trimmedDirSegments, `${pascalBase}Tests${ext}`));
+      break;
+    }
+    case '.dart': {
+      addOptionalCandidate(addRelativeCandidate, mappedFromSource(['lib'], ['test'], `_test${ext}`));
+      addRelativeCandidate(path.posix.join('test', ...trimmedDirSegments, `${snakeBase}_test${ext}`));
+      break;
+    }
+    case '.rs': {
+      addRelativeCandidate(path.posix.join(rustTestRoot, ...trimmedDirSegments, `${snakeBase}.rs`));
+      addRelativeCandidate(path.posix.join('tests', ...trimmedDirSegments, `${snakeBase}_test.rs`));
+      break;
+    }
+    case '.c':
+    case '.cc':
+    case '.cpp':
+    case '.cxx':
+    case '.h':
+    case '.hpp': {
+      addRelativeCandidate(path.posix.join(genericTestRoot, ...trimmedDirSegments, `${safeBase}.test.cpp`));
+      addRelativeCandidate(path.posix.join(genericTestRoot, ...trimmedDirSegments, `${safeBase}_test.cpp`));
+      break;
+    }
+    default: {
+      addRelativeCandidate(path.posix.join(genericTestRoot, ...trimmedDirSegments, `${safeBase}.test${ext}`));
+      break;
+    }
   }
 
-  if (ext === '.java') {
-    return ensureUniqueFilePath(path.join(dir, `${targetBase}Test.java`));
+  return candidates;
+}
+
+function addOptionalCandidate(addCandidate: (relativeCandidate: string) => void, candidate?: string): void {
+  if (candidate) {
+    addCandidate(candidate);
+  }
+}
+
+function remapRelativePath(relativePath: string, fromSegments: string[], toSegments: string[]): string | undefined {
+  const segments = normalizePath(relativePath).split('/').filter(Boolean);
+  if (segments.length < fromSegments.length) {
+    return undefined;
   }
 
-  if (ext === '.go') {
-    return ensureUniqueFilePath(path.join(dir, `${sourceBase}_test.go`));
+  for (let index = 0; index < fromSegments.length; index += 1) {
+    if (segments[index] !== fromSegments[index]) {
+      return undefined;
+    }
   }
 
-  const testDir = path.join(dir, '__tests__');
-  const suffix = ext === '.tsx' ? '.tsx' : ext === '.jsx' ? '.jsx' : ext || '.ts';
-  return ensureUniqueFilePath(path.join(testDir, `${targetBase}.test${suffix}`));
+  return [...toSegments, ...segments.slice(fromSegments.length)].join('/');
+}
+
+function trimLeadingSourceSegments(segments: string[]): string[] {
+  const removable = new Set(['src', 'lib', 'app', 'source', 'sources']);
+  const trimmed = [...segments];
+  while (trimmed.length > 0 && removable.has(trimmed[0].toLowerCase())) {
+    trimmed.shift();
+  }
+  if (trimmed[0]?.toLowerCase() === 'main') {
+    trimmed.shift();
+  }
+  if (trimmed[0]?.toLowerCase() === 'java' || trimmed[0]?.toLowerCase() === 'kotlin') {
+    trimmed.shift();
+  }
+  return trimmed;
+}
+
+function pickExistingTestRoot(workspaceRoot: string, candidates: string[]): string {
+  for (const candidate of candidates) {
+    if (fs.existsSync(path.join(workspaceRoot, ...candidate.split('/')))) {
+      return candidate;
+    }
+  }
+  return candidates[0];
+}
+
+function toSnakeCase(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase() || 'generated_test';
+}
+
+function toPascalCase(value: string): string {
+  const normalized = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .trim();
+  if (!normalized) {
+    return 'GeneratedSpec';
+  }
+
+  return normalized
+    .split(/\s+/)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join('');
+}
+
+function findTestStyleReference(sourceFilePath: string): { filePath: string; snippet: string } | undefined {
+  const ext = path.extname(sourceFilePath).toLowerCase();
+  const workspaceRoot = getWorkspaceRoot(sourceFilePath) || path.dirname(sourceFilePath);
+  const existingCandidate = buildTestFileCandidates(sourceFilePath).find((candidate) => fs.existsSync(candidate));
+  if (existingCandidate) {
+    return loadStyleReference(existingCandidate);
+  }
+
+  const searchRoots = Array.from(
+    new Set([
+      ...buildTestFileCandidates(sourceFilePath).map((candidate) => path.dirname(candidate)),
+      path.join(workspaceRoot, 'test'),
+      path.join(workspaceRoot, 'tests'),
+      path.join(workspaceRoot, 'spec'),
+      path.join(workspaceRoot, 'Tests'),
+      path.join(workspaceRoot, 'src', 'test'),
+    ])
+  );
+
+  for (const searchRoot of searchRoots) {
+    const match = findFirstMatchingTestFile(searchRoot, ext, 4);
+    if (match) {
+      return loadStyleReference(match);
+    }
+  }
+
+  return undefined;
+}
+
+function loadStyleReference(filePath: string): { filePath: string; snippet: string } {
+  const content = fs.readFileSync(filePath, 'utf8');
+  return {
+    filePath,
+    snippet: content.slice(0, 4000),
+  };
+}
+
+function findFirstMatchingTestFile(directoryPath: string, extension: string, maxDepth: number): string | undefined {
+  if (!fs.existsSync(directoryPath) || !fs.statSync(directoryPath).isDirectory()) {
+    return undefined;
+  }
+
+  const ignoredDirectories = new Set(['node_modules', '.git', 'dist', 'out', 'coverage', '.next']);
+  const queue: Array<{ directoryPath: string; depth: number }> = [{ directoryPath, depth: 0 }];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const entries = fs.readdirSync(current.directoryPath, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    for (const entry of entries) {
+      const entryPath = path.join(current.directoryPath, entry.name);
+      if (entry.isDirectory()) {
+        if (current.depth < maxDepth && !ignoredDirectories.has(entry.name)) {
+          queue.push({ directoryPath: entryPath, depth: current.depth + 1 });
+        }
+        continue;
+      }
+
+      if (path.extname(entry.name).toLowerCase() === extension && isTestLikeFilePath(entryPath)) {
+        return entryPath;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function ensureUniqueFilePath(initialPath: string): string {
@@ -1691,29 +2309,7 @@ function findAffectedNodeIds(statuses: Record<string, GraphTestStatus>): string[
 }
 
 function resolveTestFilePathFromSource(sourceFilePath: string): string {
-  const ext = path.extname(sourceFilePath);
-  const dir = path.dirname(sourceFilePath);
-  const sourceBase = path.basename(sourceFilePath, ext);
-
-  if (ext === '.py') {
-    return ensureUniqueFilePath(path.join(dir, `test_${sourceBase}.py`));
-  }
-  if (ext === '.java') {
-    return ensureUniqueFilePath(path.join(dir, `${sourceBase}Test.java`));
-  }
-  if (ext === '.go') {
-    return ensureUniqueFilePath(path.join(dir, `${sourceBase}_test.go`));
-  }
-  if (ext === '.kt' || ext === '.kts') {
-    return ensureUniqueFilePath(path.join(dir, `${sourceBase}Test.kt`));
-  }
-  if (ext === '.cs') {
-    return ensureUniqueFilePath(path.join(dir, `${sourceBase}Tests.cs`));
-  }
-
-  const testDir = path.join(dir, '__tests__');
-  const suffix = ext === '.tsx' ? '.tsx' : ext === '.jsx' ? '.jsx' : ext || '.ts';
-  return ensureUniqueFilePath(path.join(testDir, `${sourceBase}.test${suffix}`));
+  return ensureUniqueFilePath(buildTestFileCandidates(sourceFilePath)[0]);
 }
 
 function inferTestCommand(rootPath: string): string | undefined {
@@ -1748,6 +2344,14 @@ function inferTestCommand(rootPath: string): string | undefined {
     return 'cargo test';
   }
 
+  if (fs.existsSync(path.join(rootPath, 'phpunit.xml')) || fs.existsSync(path.join(rootPath, 'phpunit.xml.dist'))) {
+    return 'vendor/bin/phpunit';
+  }
+
+  if (fs.existsSync(path.join(rootPath, 'pubspec.yaml'))) {
+    return 'dart test';
+  }
+
   // Ruby
   if (fs.existsSync(path.join(rootPath, 'Gemfile'))) {
     return 'bundle exec rspec';
@@ -1766,32 +2370,7 @@ function inferTestCommand(rootPath: string): string | undefined {
  * Searches common naming conventions across languages.
  */
 function findExistingTestFile(sourceFilePath: string): string | undefined {
-  const ext = path.extname(sourceFilePath);
-  const dir = path.dirname(sourceFilePath);
-  const base = path.basename(sourceFilePath, ext);
-
-  const candidates = [
-    // Python
-    path.join(dir, `test_${base}${ext}`),
-    path.join(dir, `${base}_test${ext}`),
-    path.join(dir, 'tests', `test_${base}${ext}`),
-    // Java / Kotlin
-    path.join(dir, `${base}Test${ext}`),
-    path.join(dir, `${base}Tests${ext}`),
-    // Go
-    path.join(dir, `${base}_test${ext}`),
-    // JS/TS
-    path.join(dir, `${base}.test${ext}`),
-    path.join(dir, `${base}.spec${ext}`),
-    path.join(dir, '__tests__', `${base}.test${ext}`),
-    path.join(dir, '__tests__', `${base}.spec${ext}`),
-    path.join(dir, '__tests__', `${base}${ext}`),
-    // Generated variants
-    path.join(dir, `${base}Test.generated${ext}`),
-    path.join(dir, `test_${base}.generated${ext}`),
-  ];
-
-  return candidates.find((c) => fs.existsSync(c));
+  return buildTestFileCandidates(sourceFilePath).find((candidate) => fs.existsSync(candidate));
 }
 
 /**
@@ -1875,9 +2454,21 @@ function inferTestCommandForFile(filePath: string, rootPath: string): string | u
     return 'dotnet test';
   }
 
+  if (ext === '.php') {
+    return 'vendor/bin/phpunit';
+  }
+
   // Ruby
   if (ext === '.rb') {
     return 'bundle exec rspec';
+  }
+
+  if (ext === '.swift') {
+    return 'xcodebuild test';
+  }
+
+  if (ext === '.dart') {
+    return 'dart test';
   }
 
   return inferTestCommand(rootPath);

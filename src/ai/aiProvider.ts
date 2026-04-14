@@ -9,7 +9,7 @@ export interface IAIProvider {
   isAvailable(): Promise<boolean>;
   analyzeCode(code: string, context: AIContext): Promise<AIAnalysisResult>;
   analyzeChanges(diff: string, context: AIContext): Promise<AIAnalysisResult>;
-  generateText(prompt: string): Promise<string>;
+  generateText(prompt: string, options?: AITextRequestOptions): Promise<string>;
 }
 
 export interface AIContext {
@@ -18,6 +18,10 @@ export interface AIContext {
   projectContext?: string;
   existingCode?: string;
   instructions?: string;
+}
+
+export interface AITextRequestOptions {
+  modelPreference?: string;
 }
 
 /**
@@ -187,10 +191,10 @@ ${context.instructions || 'Analyze if the new code is compatible with the existi
     };
   }
 
-  async generateText(prompt: string): Promise<string> {
+  async generateText(prompt: string, options?: AITextRequestOptions): Promise<string> {
     const config = vscode.workspace.getConfiguration('codeVisual');
     const apiKey = config.get<string>('openaiApiKey', '');
-    const model = config.get<string>('openaiModel', 'gpt-4o');
+    const model = options?.modelPreference || config.get<string>('openaiModel', 'gpt-4o');
 
     if (!apiKey) {
       throw new Error('OpenAI API key not configured');
@@ -237,7 +241,7 @@ export class CopilotProvider implements IAIProvider {
   }
 
   /** Pick the best available Copilot model, respecting user's setting. */
-  private async selectModel(): Promise<vscode.LanguageModelChat> {
+  private async selectModel(preferredModel?: string): Promise<vscode.LanguageModelChat> {
     const all = await this.listAvailableModels();
     if (all.length === 0) {
       throw new Error(
@@ -249,7 +253,7 @@ export class CopilotProvider implements IAIProvider {
 
     // Respect user model preference from settings
     const config = vscode.workspace.getConfiguration('codeflow');
-    const preferred = config.get<string>('ai.model', 'auto');
+    const preferred = preferredModel || config.get<string>('ai.model', 'auto');
     if (preferred && preferred !== 'auto' && preferred !== 'copilot-default') {
       // Try exact match first, then partial match
       const exact = all.find(
@@ -282,8 +286,8 @@ export class CopilotProvider implements IAIProvider {
     }
   }
 
-  private async sendPrompt(prompt: string): Promise<string> {
-    const model = await this.selectModel();
+  private async sendPrompt(prompt: string, options?: AITextRequestOptions): Promise<string> {
+    const model = await this.selectModel(options?.modelPreference);
     const messages = [vscode.LanguageModelChatMessage.User(prompt)];
     const response = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
     let text = '';
@@ -418,8 +422,8 @@ ${diff.slice(0, 12000)}
     return this.parseResult(text, model.id, 'GitHub Copilot');
   }
 
-  async generateText(prompt: string): Promise<string> {
-    return this.sendPrompt(prompt);
+  async generateText(prompt: string, options?: AITextRequestOptions): Promise<string> {
+    return this.sendPrompt(prompt, options);
   }
 }
 
@@ -471,8 +475,8 @@ export class AIProviderManager {
     return provider.analyzeChanges(diff, context);
   }
 
-  async generateText(prompt: string): Promise<string> {
+  async generateText(prompt: string, options?: AITextRequestOptions): Promise<string> {
     const provider = await this.getProvider();
-    return provider.generateText(prompt);
+    return provider.generateText(prompt, options);
   }
 }

@@ -191,6 +191,18 @@ export type GraphTestStatus =
   | 'passed'
   | 'failed';
 
+export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
+
+export interface TestAgentSettings {
+  model: string;
+  parallelMode: 'auto' | 'custom';
+  maxParallelAgents: number;
+  desiredCoveragePercent: number;
+  skillDirectory: string;
+  includeSecurityScenarios: boolean;
+  includeDataLeakChecks: boolean;
+}
+
 export interface GraphClassSummary {
   nodeId?: string;
   name: string;
@@ -281,10 +293,27 @@ export interface GraphNodeData {
   classCount?: number;
   methodCount?: number;
   testCount?: number;
+  testFileCount?: number;
+  testCaseCount?: number;
+  testLineCount?: number;
+  linkedTestFilePath?: string;
+  linkedTestRelativePath?: string;
+  linkedTestCaseCount?: number;
+  linkedTestLineCount?: number;
+  linkedTestGeneratedBy?: string;
+  coverageEstimate?: number;
+  desiredCoveragePercent?: number;
+  coveredMethodCount?: number;
+  uncoveredMethodCount?: number;
+  uncoveredMembers?: string[];
   complexity?: number;
   complexityRank?: number;
   hotspotScore?: number;
   hotspotRank?: number;
+  securityLevel?: RiskLevel;
+  dataLeakLevel?: RiskLevel;
+  securityFindings?: string[];
+  dataLeakFindings?: string[];
   overlayMode?: 'none' | 'complexity' | 'hotspot';
   heatRank?: number;
   impactRole?: 'selected' | 'upstream' | 'downstream' | 'both';
@@ -333,6 +362,11 @@ export interface GraphData {
     totalFiles: number;
     totalSymbols: number;
     totalLines: number;
+    totalTestFiles?: number;
+    totalTestCases?: number;
+    totalTestLines?: number;
+    totalCoveredMembers?: number;
+    totalUncoveredMembers?: number;
     changeEvent?: {
       paths: string[];
       reason: 'manual' | 'watcher';
@@ -490,6 +524,7 @@ export type WebviewMessage =
       review?: GitAnalysisResult;
       settings: GitWebhookSettings;
     }
+  | { type: 'testAgentSettings'; settings: TestAgentSettings }
   | { type: 'status'; level: 'info' | 'success' | 'warning' | 'error'; message: string }
   | { type: 'error'; message: string }
   | { type: 'testDiffResult'; targetLabel: string; missingScenarios: string; testFilePath?: string; sourceFilePath?: string };
@@ -504,6 +539,7 @@ export type ExtensionMessage =
   | { type: 'requestGitData' }
   | { type: 'requestGitAnalysis' }
   | { type: 'saveGitSettings'; data: GitWebhookSettings }
+  | { type: 'saveTestAgentSettings'; data: TestAgentSettings }
   | {
       type: 'export';
       data: {
