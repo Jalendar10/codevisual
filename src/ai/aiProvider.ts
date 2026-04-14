@@ -226,6 +226,10 @@ ${context.instructions || 'Analyze if the new code is compatible with the existi
 export class CopilotProvider implements IAIProvider {
   name = 'GitHub Copilot';
 
+  private isGitHubCopilotModel(model: vscode.LanguageModelChat): boolean {
+    return (model.vendor || '').toLowerCase() === 'copilot';
+  }
+
   async isAvailable(): Promise<boolean> {
     // Only check that vscode.lm exists and the Copilot extension is installed.
     // Do NOT call selectChatModels here — that triggers a VS Code permission
@@ -277,7 +281,8 @@ export class CopilotProvider implements IAIProvider {
   /** List all available Copilot models — exposed so the extension can show a picker. */
   async listAvailableModels(): Promise<vscode.LanguageModelChat[]> {
     try {
-      return await vscode.lm.selectChatModels({ vendor: 'copilot' });
+      const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+      return models.filter((model) => this.isGitHubCopilotModel(model));
     } catch (err) {
       throw new Error(
         `Could not access GitHub Copilot models: ${err instanceof Error ? err.message : String(err)}. ` +

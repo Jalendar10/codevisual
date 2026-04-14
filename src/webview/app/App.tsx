@@ -144,7 +144,7 @@ export default function App() {
     includeDataLeakChecks: true,
   });
   const [lastAiRequestNodeId, setLastAiRequestNodeId] = useState<string | null>(null);
-  const [aiModels, setAiModels] = useState<Array<{ id: string; family: string }>>([]);
+  const [aiModels, setAiModels] = useState<Array<{ id: string; family: string; name?: string }>>([]);
   const [aiStatus, setAiStatus] = useState({
     available: false,
     provider: 'GitHub Copilot',
@@ -1699,17 +1699,17 @@ export default function App() {
             </div>
             <div className="settings-grid">
               <label className="settings-field">
-                <span>AI Model</span>
+                <span>GitHub AI Model</span>
                 <select
                   value={aiStatus.model || 'auto'}
                   onChange={(event) => {
                     vscode.postMessage({ type: 'selectModel', modelId: event.target.value } as any);
                   }}
                 >
-                  <option value="auto">auto (best available)</option>
+                  <option value="auto">auto (best GitHub Copilot model)</option>
                   {aiModels.map((m) => (
                     <option key={m.id} value={m.id}>
-                      {m.id} ({m.family})
+                      {m.name || m.id} ({m.family})
                     </option>
                   ))}
                 </select>
@@ -1733,11 +1733,11 @@ export default function App() {
                     }))
                   }
                 >
-                  <option value="inherit">inherit AI model</option>
-                  <option value="auto">auto</option>
+                  <option value="inherit">inherit selected GitHub AI model</option>
+                  <option value="auto">auto GitHub Copilot model</option>
                   {aiModels.map((m) => (
                     <option key={`test-${m.id}`} value={m.id}>
-                      {m.id} ({m.family})
+                      {m.name || m.id} ({m.family})
                     </option>
                   ))}
                 </select>

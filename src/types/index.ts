@@ -510,7 +510,7 @@ export type WebviewMessage =
   | { type: 'updateGraph'; data: GraphData; visualState?: PersistedVisualState }
   | { type: 'aiAnalysis'; nodeId?: string; analysis: AIAnalysisResult; targetLabel: string }
   | { type: 'aiStatus'; available: boolean; provider: string; message: string; model?: string }
-  | { type: 'aiModels'; models: Array<{ id: string; family: string }> }
+  | { type: 'aiModels'; models: Array<{ id: string; family: string; name?: string }> }
   | { type: 'codePreview'; preview: CodePreview }
   | {
       type: 'testResults';

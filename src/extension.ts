@@ -425,6 +425,7 @@ export function activate(context: vscode.ExtensionContext) {
       const simplified = models.map((m) => ({
         id: m.id || m.family || 'unknown',
         family: m.family || 'n/a',
+        name: m.name || m.id || m.family || 'GitHub Copilot model',
       }));
       webview?.showModels(simplified);
     } catch {
