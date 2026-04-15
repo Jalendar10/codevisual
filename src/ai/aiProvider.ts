@@ -226,8 +226,55 @@ ${context.instructions || 'Analyze if the new code is compatible with the existi
 export class CopilotProvider implements IAIProvider {
   name = 'GitHub Copilot';
 
-  private isGitHubCopilotModel(model: vscode.LanguageModelChat): boolean {
-    return (model.vendor || '').toLowerCase() === 'copilot';
+  private getCopilotManagedVendors(): Set<string> {
+    const vendors = new Set<string>(['copilot']);
+    const extension = vscode.extensions.getExtension('GitHub.copilot-chat');
+    const providers = extension?.packageJSON?.contributes?.languageModelChatProviders;
+
+    if (Array.isArray(providers)) {
+      for (const provider of providers) {
+        if (!provider || typeof provider.vendor !== 'string') {
+          continue;
+        }
+        if (typeof provider.when === 'string' && provider.when.trim() === 'false') {
+          continue;
+        }
+        vendors.add(provider.vendor.toLowerCase());
+      }
+    }
+
+    return vendors;
+  }
+
+  private isCopilotManagedModel(model: vscode.LanguageModelChat, allowedVendors: Set<string>): boolean {
+    return allowedVendors.has((model.vendor || '').toLowerCase());
+  }
+
+  serializeModelKey(model: Pick<vscode.LanguageModelChat, 'id' | 'vendor'>): string {
+    return `vendor:${encodeURIComponent(model.vendor || 'unknown')}|id:${encodeURIComponent(model.id || 'unknown')}`;
+  }
+
+  private parseModelKey(value?: string): { vendor?: string; id?: string } | undefined {
+    if (!value || value === 'auto' || value === 'copilot-default') {
+      return undefined;
+    }
+    const match = value.match(/^vendor:(.+)\|id:(.+)$/);
+    if (!match) {
+      return undefined;
+    }
+    return {
+      vendor: decodeURIComponent(match[1]),
+      id: decodeURIComponent(match[2]),
+    };
+  }
+
+  getModelLabel(model: Pick<vscode.LanguageModelChat, 'name' | 'id' | 'vendor' | 'family'>): string {
+    const base = model.name || model.id || model.family || 'Unknown model';
+    const vendor = model.vendor || 'unknown';
+    if (vendor.toLowerCase() === 'copilot') {
+      return base;
+    }
+    return `${base} (${vendor})`;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -259,30 +306,54 @@ export class CopilotProvider implements IAIProvider {
     const config = vscode.workspace.getConfiguration('codeflow');
     const preferred = preferredModel || config.get<string>('ai.model', 'auto');
     if (preferred && preferred !== 'auto' && preferred !== 'copilot-default') {
-      // Try exact match first, then partial match
-      const exact = all.find(
-        (m) => m.id === preferred || m.family === preferred
-      );
+      const preferredKey = this.parseModelKey(preferred);
+      const exact = preferredKey
+        ? all.find(
+            (m) =>
+              (m.vendor || '').toLowerCase() === (preferredKey.vendor || '').toLowerCase() &&
+              m.id === preferredKey.id
+          )
+        : all.find((m) => m.id === preferred || m.family === preferred || m.name === preferred);
       if (exact) {
         return exact;
       }
       const partial = all.find(
-        (m) => m.id?.includes(preferred) || m.family?.includes(preferred)
+        (m) =>
+          m.id?.includes(preferred) ||
+          m.family?.includes(preferred) ||
+          m.name?.includes(preferred)
       );
       if (partial) {
         return partial;
       }
     }
 
-    // Prefer a GPT-4 class model; fall back to whatever is available
-    return all.find((m) => m.family?.includes('gpt-4') || m.id?.includes('gpt-4')) ?? all[0];
+    return all.find((m) => m.id === 'auto') ??
+      all.find((m) => m.family?.includes('gpt-4') || m.id?.includes('gpt-4')) ??
+      all[0];
   }
 
   /** List all available Copilot models — exposed so the extension can show a picker. */
   async listAvailableModels(): Promise<vscode.LanguageModelChat[]> {
     try {
-      const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-      return models.filter((model) => this.isGitHubCopilotModel(model));
+      const allowedVendors = this.getCopilotManagedVendors();
+      const models = await vscode.lm.selectChatModels();
+      const seen = new Set<string>();
+      const filtered: vscode.LanguageModelChat[] = [];
+
+      for (const model of models) {
+        if (!this.isCopilotManagedModel(model, allowedVendors)) {
+          continue;
+        }
+        const key = this.serializeModelKey(model);
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        filtered.push(model);
+      }
+
+      return filtered;
     } catch (err) {
       throw new Error(
         `Could not access GitHub Copilot models: ${err instanceof Error ? err.message : String(err)}. ` +

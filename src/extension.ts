@@ -51,6 +51,31 @@ interface GraphChangeEvent {
   updatedAt: number;
 }
 
+function parseStoredAiModel(value: string): { vendor?: string; id?: string } | undefined {
+  const match = value.match(/^vendor:(.+)\|id:(.+)$/);
+  if (!match) {
+    return undefined;
+  }
+  return {
+    vendor: decodeURIComponent(match[1]),
+    id: decodeURIComponent(match[2]),
+  };
+}
+
+function formatStoredAiModelLabel(value: string): string {
+  if (!value || value === 'auto' || value === 'copilot-default') {
+    return 'auto';
+  }
+  const parsed = parseStoredAiModel(value);
+  if (!parsed?.id) {
+    return value;
+  }
+  if (!parsed.vendor || parsed.vendor.toLowerCase() === 'copilot') {
+    return parsed.id;
+  }
+  return `${parsed.id} (${parsed.vendor})`;
+}
+
 export function activate(context: vscode.ExtensionContext) {
   extensionBasePath = context.extensionPath;
   const aiManager = new AIProviderManager();
@@ -174,8 +199,9 @@ export function activate(context: vscode.ExtensionContext) {
         const items = [
           { label: 'auto', description: 'Automatically pick the best available model' },
           ...models.map((m) => ({
-            label: m.id || m.family || 'unknown',
-            description: `Family: ${m.family || 'n/a'} | Max tokens: ${m.maxInputTokens || 'n/a'}`,
+            label: copilot.getModelLabel(m),
+            description: `Vendor: ${m.vendor || 'n/a'} | Family: ${m.family || 'n/a'} | Max tokens: ${m.maxInputTokens || 'n/a'}`,
+            modelKey: copilot.serializeModelKey(m),
           })),
         ];
 
@@ -186,7 +212,11 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (picked) {
           const config = vscode.workspace.getConfiguration('codeflow');
-          await config.update('ai.model', picked.label, vscode.ConfigurationTarget.Global);
+          await config.update(
+            'ai.model',
+            (picked as { modelKey?: string }).modelKey || 'auto',
+            vscode.ConfigurationTarget.Global
+          );
           vscode.window.showInformationMessage(`CodeFlow: AI model set to "${picked.label}"`);
           void refreshAiStatus(aiManager);
         }
@@ -423,9 +453,12 @@ export function activate(context: vscode.ExtensionContext) {
       const copilot = aiManager.getCopilotProvider();
       const models = await copilot.listAvailableModels();
       const simplified = models.map((m) => ({
+        key: copilot.serializeModelKey(m),
         id: m.id || m.family || 'unknown',
+        vendor: m.vendor || 'copilot',
         family: m.family || 'n/a',
         name: m.name || m.id || m.family || 'GitHub Copilot model',
+        label: copilot.getModelLabel(m),
       }));
       webview?.showModels(simplified);
     } catch {
@@ -434,10 +467,10 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   // User selected a model from the webview dropdown
-  webview.onDidSelectModel(async ({ modelId }) => {
+  webview.onDidSelectModel(async ({ modelKey }) => {
     const config = vscode.workspace.getConfiguration('codeflow');
-    await config.update('ai.model', modelId, vscode.ConfigurationTarget.Global);
-    webview?.showStatus('success', `AI model set to "${modelId}".`);
+    await config.update('ai.model', modelKey, vscode.ConfigurationTarget.Global);
+    webview?.showStatus('success', `AI model set to "${formatStoredAiModelLabel(modelKey)}".`);
     void refreshAiStatus(aiManager);
   });
 
@@ -734,7 +767,11 @@ async function refreshAiStatus(aiManager?: AIProviderManager): Promise<void> {
   // Include the currently configured model name
   const config = vscode.workspace.getConfiguration('codeflow');
   const modelSetting = config.get<string>('ai.model', 'auto');
-  webview.updateAiStatus({ ...status, model: modelSetting });
+  webview.updateAiStatus({
+    ...status,
+    modelKey: modelSetting,
+    modelLabel: formatStoredAiModelLabel(modelSetting),
+  });
 }
 
 async function pushGitData(review?: GitAnalysisResult): Promise<void> {

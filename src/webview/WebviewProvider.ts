@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import {
+  AIModelOption,
   AIAnalysisResult,
   CodePreview,
   ExtensionMessage,
@@ -46,7 +47,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
   private readonly testAgentSettingsEmitter = new vscode.EventEmitter<TestAgentSettings>();
   private readonly refreshEmitter = new vscode.EventEmitter<void>();
   private readonly requestModelsEmitter = new vscode.EventEmitter<void>();
-  private readonly selectModelEmitter = new vscode.EventEmitter<{ modelId: string }>();
+  private readonly selectModelEmitter = new vscode.EventEmitter<{ modelKey: string }>();
   private readonly testDiffEmitter = new vscode.EventEmitter<{ nodeId?: string }>();
   private readonly applySuggestionEmitter = new vscode.EventEmitter<{ filePath: string; line: number; endLine?: number; original: string; suggested: string }>();
   private readonly runTestsForFileEmitter = new vscode.EventEmitter<{ filePath: string }>();
@@ -179,7 +180,13 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
     this.post({ type: 'updateGraph', data: graph, visualState });
   }
 
-  updateAiStatus(status: { available: boolean; provider: string; message: string; model?: string }): void {
+  updateAiStatus(status: {
+    available: boolean;
+    provider: string;
+    message: string;
+    modelKey?: string;
+    modelLabel?: string;
+  }): void {
     this.post({ type: 'aiStatus', ...status });
   }
 
@@ -215,7 +222,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
     this.post({ type: 'testAgentSettings', settings });
   }
 
-  showModels(models: Array<{ id: string; family: string }>): void {
+  showModels(models: AIModelOption[]): void {
     this.post({ type: 'aiModels', models });
   }
 
@@ -302,7 +309,7 @@ export class CodeFlowWebviewProvider implements vscode.WebviewPanelSerializer {
         this.requestModelsEmitter.fire();
         break;
       case 'selectModel':
-        this.selectModelEmitter.fire({ modelId: (message as any).modelId });
+        this.selectModelEmitter.fire({ modelKey: (message as any).modelKey });
         break;
       case 'requestTestDiff':
         this.testDiffEmitter.fire({ nodeId: (message as any).nodeId });

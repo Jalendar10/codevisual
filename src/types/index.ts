@@ -506,11 +506,27 @@ export interface PersistedVisualState {
   aiAnalyses?: Record<string, { targetLabel: string; analysis: AIAnalysisResult }>;
 }
 
+export interface AIModelOption {
+  key: string;
+  id: string;
+  vendor: string;
+  family: string;
+  name?: string;
+  label?: string;
+}
+
 export type WebviewMessage =
   | { type: 'updateGraph'; data: GraphData; visualState?: PersistedVisualState }
   | { type: 'aiAnalysis'; nodeId?: string; analysis: AIAnalysisResult; targetLabel: string }
-  | { type: 'aiStatus'; available: boolean; provider: string; message: string; model?: string }
-  | { type: 'aiModels'; models: Array<{ id: string; family: string; name?: string }> }
+  | {
+      type: 'aiStatus';
+      available: boolean;
+      provider: string;
+      message: string;
+      modelKey?: string;
+      modelLabel?: string;
+    }
+  | { type: 'aiModels'; models: AIModelOption[] }
   | { type: 'codePreview'; preview: CodePreview }
   | {
       type: 'testResults';
@@ -551,7 +567,7 @@ export type ExtensionMessage =
     }
   | { type: 'requestRefresh' }
   | { type: 'requestModels' }
-  | { type: 'selectModel'; modelId: string }
+  | { type: 'selectModel'; modelKey: string }
   | { type: 'requestTestDiff'; nodeId?: string }
   | { type: 'applySuggestion'; filePath: string; line: number; endLine?: number; original: string; suggested: string }
   | { type: 'saveVisualState'; graphPath: string; graphType: GraphData['metadata']['type']; state: PersistedVisualState }

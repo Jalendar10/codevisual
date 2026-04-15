@@ -17,6 +17,7 @@ import {
 } from '@xyflow/react';
 import { toPng, toSvg } from 'html-to-image';
 import {
+  AIModelOption,
   AIAnalysisResult,
   CodePreview,
   GraphData,
@@ -48,6 +49,20 @@ type StatusTone = 'info' | 'success' | 'warning' | 'error';
 type HeatOverlayMode = 'none' | 'complexity' | 'hotspot';
 type VisualPreset = 'overview' | 'tests' | 'flow';
 type MeasuredNodeSize = { width: number; height: number };
+
+function resolveModelOptionValue(value: string | undefined, models: AIModelOption[]): string {
+  if (!value || value === 'auto' || value === 'inherit') {
+    return value || 'auto';
+  }
+  const exact = models.find((model) => model.key === value);
+  if (exact) {
+    return exact.key;
+  }
+  const legacy = models.find(
+    (model) => model.id === value || model.family === value || model.name === value
+  );
+  return legacy?.key || value;
+}
 
 const nodeTypes = {
   folder: FolderNode,
@@ -144,12 +159,13 @@ export default function App() {
     includeDataLeakChecks: true,
   });
   const [lastAiRequestNodeId, setLastAiRequestNodeId] = useState<string | null>(null);
-  const [aiModels, setAiModels] = useState<Array<{ id: string; family: string; name?: string }>>([]);
+  const [aiModels, setAiModels] = useState<AIModelOption[]>([]);
   const [aiStatus, setAiStatus] = useState({
     available: false,
     provider: 'GitHub Copilot',
     message: 'Checking Copilot availability…',
-    model: 'auto',
+    modelKey: 'auto',
+    modelLabel: 'auto',
   });
   const [aiAnalysis, setAiAnalysis] = useState<{
     targetLabel: string;
@@ -165,6 +181,8 @@ export default function App() {
     sourceFilePath?: string;
   } | null>(null);
   const [instance, setInstance] = useState<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
+  const selectedAiModelValue = resolveModelOptionValue(aiStatus.modelKey, aiModels);
+  const selectedTestAgentModelValue = resolveModelOptionValue(testAgentSettings.model, aiModels);
 
   useEffect(() => {
     vscode.setState({
@@ -272,7 +290,8 @@ export default function App() {
             available: message.available,
             provider: message.provider,
             message: message.message,
-            model: (message as any).model || 'auto',
+            modelKey: (message as any).modelKey || 'auto',
+            modelLabel: (message as any).modelLabel || 'auto',
           });
           break;
         case 'aiModels':
@@ -1694,22 +1713,22 @@ export default function App() {
                 {aiStatus.available ? 'Available' : 'Unavailable'}
               </span>
               <span className="status-pill is-info">
-                Model: {aiStatus.model || 'auto'}
+                Model: {aiStatus.modelLabel || 'auto'}
               </span>
             </div>
             <div className="settings-grid">
               <label className="settings-field">
                 <span>GitHub AI Model</span>
                 <select
-                  value={aiStatus.model || 'auto'}
+                  value={selectedAiModelValue}
                   onChange={(event) => {
-                    vscode.postMessage({ type: 'selectModel', modelId: event.target.value } as any);
+                    vscode.postMessage({ type: 'selectModel', modelKey: event.target.value } as any);
                   }}
                 >
                   <option value="auto">auto (best GitHub Copilot model)</option>
                   {aiModels.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name || m.id} ({m.family})
+                    <option key={m.key} value={m.key}>
+                      {m.label || m.name || m.id} ({m.family})
                     </option>
                   ))}
                 </select>
@@ -1725,7 +1744,7 @@ export default function App() {
               <label className="settings-field">
                 <span>Test Agent Model</span>
                 <select
-                  value={testAgentSettings.model}
+                  value={selectedTestAgentModelValue}
                   onChange={(event) =>
                     setTestAgentSettings((current) => ({
                       ...current,
@@ -1736,8 +1755,8 @@ export default function App() {
                   <option value="inherit">inherit selected GitHub AI model</option>
                   <option value="auto">auto GitHub Copilot model</option>
                   {aiModels.map((m) => (
-                    <option key={`test-${m.id}`} value={m.id}>
-                      {m.name || m.id} ({m.family})
+                    <option key={`test-${m.key}`} value={m.key}>
+                      {m.label || m.name || m.id} ({m.family})
                     </option>
                   ))}
                 </select>
