@@ -443,6 +443,41 @@ function renderNodeIndicators(summary: unknown, status?: GraphTestStatus) {
   );
 }
 
+const entryHandleStyle: CSSProperties = {
+  left: 16,
+  top: 0,
+  transform: 'translate(-10%, -50%)',
+};
+
+const exitHandleStyle: CSSProperties = {
+  left: 'auto',
+  right: 16,
+  top: 'auto',
+  bottom: 0,
+  transform: 'translate(10%, 50%)',
+};
+
+function renderPorts() {
+  return (
+    <>
+      <Handle
+        type="target"
+        position={Position.Top}
+        className="cf-handle cf-handle--entry"
+        style={entryHandleStyle}
+      />
+      <span className="cf-node__port-label cf-node__port-label--entry">Entry</span>
+      <span className="cf-node__port-label cf-node__port-label--exit">Exit</span>
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="cf-handle cf-handle--exit"
+        style={exitHandleStyle}
+      />
+    </>
+  );
+}
+
 function impactRole(data: GraphNodeData): ImpactRole | undefined {
   return typeof data.impactRole === 'string' ? (data.impactRole as ImpactRole) : undefined;
 }
@@ -537,7 +572,7 @@ export function FolderNode({ id, data, selected }: NodeProps) {
   const isExpanded = payload.expanded !== false;
   return (
     <div className={nodeClassName('cf-node cf-node-folder', payload, selected)} style={nodeSurfaceStyle(payload)}>
-      <Handle type="target" position={Position.Left} className="cf-handle" />
+      {renderPorts()}
       <div className="cf-node__header">
         <span className="cf-node__toggle">{isExpanded ? '▾' : '▸'}</span>
         <div className="cf-node__titles">
@@ -563,7 +598,6 @@ export function FolderNode({ id, data, selected }: NodeProps) {
           {renderRiskSummary(payload)}
         </>
       ) : null}
-      <Handle type="source" position={Position.Right} className="cf-handle" />
     </div>
   );
 }
@@ -576,7 +610,7 @@ export function FileNode({ id, data, selected }: NodeProps) {
       className={nodeClassName('cf-node cf-node-file', payload, selected)}
       style={{ width: 'auto', minWidth: 320, ...nodeSurfaceStyle(payload) }}
     >
-      <Handle type="target" position={Position.Left} className="cf-handle" />
+      {renderPorts()}
       <div className="cf-node__header">
         <span className="cf-node__glyph">◫</span>
         <div className="cf-node__titles">
@@ -631,7 +665,6 @@ export function FileNode({ id, data, selected }: NodeProps) {
       <div className="cf-node__footer">
         <span title={payload.relativePath || payload.filePath}>{shortPath(payload.relativePath || payload.filePath)}</span>
       </div>
-      <Handle type="source" position={Position.Right} className="cf-handle" />
     </div>
   );
 }
@@ -644,7 +677,7 @@ export function SymbolNode({ id, data, selected, type }: NodeProps) {
       className={nodeClassName(`cf-node cf-node-symbol cf-node-symbol--${type}`, payload, selected)}
       style={{ width: 'auto', minWidth: 260, ...nodeSurfaceStyle(payload) }}
     >
-      <Handle type="target" position={Position.Left} className="cf-handle" />
+      {renderPorts()}
       <div className="cf-node__header">
         <span className="cf-node__pill">{payload.kind || type}</span>
         <div className="cf-node__titles">
@@ -676,7 +709,6 @@ export function SymbolNode({ id, data, selected, type }: NodeProps) {
         </>
       ) : null}
       {payload.docComment && <div className="cf-node__footer">{payload.docComment}</div>}
-      <Handle type="source" position={Position.Right} className="cf-handle" />
     </div>
   );
 }
@@ -685,7 +717,7 @@ export function ModuleNode({ data, selected }: NodeProps) {
   const payload = data as GraphNodeData;
   return (
     <div className={nodeClassName('cf-node cf-node-module', payload, selected)} style={nodeSurfaceStyle(payload)}>
-      <Handle type="target" position={Position.Left} className="cf-handle" />
+      {renderPorts()}
       <div className="cf-node__header">
         <span className="cf-node__glyph">{payload.external ? '⟡' : '⬢'}</span>
         <div className="cf-node__titles">
@@ -696,7 +728,6 @@ export function ModuleNode({ data, selected }: NodeProps) {
       <div className="cf-node__footer">
         <span title={payload.relativePath || payload.filePath}>{shortPath(payload.relativePath || payload.filePath)}</span>
       </div>
-      <Handle type="source" position={Position.Right} className="cf-handle" />
     </div>
   );
 }

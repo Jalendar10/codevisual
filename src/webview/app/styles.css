@@ -579,7 +579,7 @@ body {
   position: relative;
   display: grid;
   gap: 10px;
-  padding: 14px 16px;
+  padding: 28px 16px;
   border-radius: 22px;
   color: #f7fbff;
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -660,6 +660,36 @@ body {
   gap: 10px;
   overflow: hidden;
   min-width: 0;
+}
+
+.cf-node__port-label {
+  position: absolute;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(8, 17, 30, 0.76);
+  color: rgba(247, 251, 255, 0.86);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+  user-select: none;
+  backdrop-filter: blur(8px);
+}
+
+.cf-node__port-label--entry {
+  top: 8px;
+  left: 12px;
+}
+
+.cf-node__port-label--exit {
+  right: 12px;
+  bottom: 8px;
 }
 
 .cf-node__titles {
@@ -1226,9 +1256,27 @@ body {
     0 2px 4px rgba(0, 0, 0, 0.22);
 }
 
+.cf-handle--entry {
+  background: linear-gradient(180deg, #89f4ef, #36b9b2);
+}
+
+.cf-handle--exit {
+  background: linear-gradient(180deg, #ffd88d, #ee9142);
+}
+
 .cf-node-symbol--function .cf-handle,
 .cf-node-symbol--method .cf-handle {
   background: rgba(78, 18, 31, 0.96);
+}
+
+.cf-node-symbol--function .cf-handle--entry,
+.cf-node-symbol--method .cf-handle--entry {
+  background: linear-gradient(180deg, #ffd6d0, #f07f72);
+}
+
+.cf-node-symbol--function .cf-handle--exit,
+.cf-node-symbol--method .cf-handle--exit {
+  background: linear-gradient(180deg, #ffe3a4, #f3a15a);
 }
 
 .cf-node-symbol--function .cf-node__label,
