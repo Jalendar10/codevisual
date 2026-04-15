@@ -427,6 +427,22 @@ function renderAiDot(summary?: unknown) {
   return <span className="cf-node__ai-dot" title="AI analysis available" />;
 }
 
+function renderNodeIndicators(summary: unknown, status?: GraphTestStatus) {
+  const aiDot = renderAiDot(summary);
+  const testPill = renderTestStatus(status);
+
+  if (!aiDot && !testPill) {
+    return null;
+  }
+
+  return (
+    <div className="cf-node__indicators">
+      {aiDot}
+      {testPill}
+    </div>
+  );
+}
+
 function impactRole(data: GraphNodeData): ImpactRole | undefined {
   return typeof data.impactRole === 'string' ? (data.impactRole as ImpactRole) : undefined;
 }
@@ -566,8 +582,7 @@ export function FileNode({ id, data, selected }: NodeProps) {
         <div className="cf-node__titles">
           <div className="cf-node__label-row">
             <div className="cf-node__label">{payload.label}</div>
-            {renderAiDot(payload.summary)}
-            {renderTestStatus(payload.testStatus)}
+            {renderNodeIndicators(payload.summary, payload.testStatus)}
           </div>
           <div className="cf-node__caption">{payload.language || 'file'}</div>
         </div>
@@ -635,8 +650,7 @@ export function SymbolNode({ id, data, selected, type }: NodeProps) {
         <div className="cf-node__titles">
           <div className="cf-node__label-row">
             <div className="cf-node__label">{payload.label}</div>
-            {renderAiDot(payload.summary)}
-            {renderTestStatus(payload.testStatus)}
+            {renderNodeIndicators(payload.summary, payload.testStatus)}
           </div>
           <div className="cf-node__caption">{nodeMeta(payload)}</div>
         </div>

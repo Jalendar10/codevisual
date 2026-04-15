@@ -693,15 +693,28 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  justify-content: space-between;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.cf-node__indicators {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .cf-node__ai-dot {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 999px;
-  background: #4dd7d1;
-  box-shadow: 0 0 0 3px rgba(77, 215, 209, 0.16);
+  border: 2px solid rgba(255, 255, 255, 0.84);
+  background: linear-gradient(180deg, #84f3ee, #2ea9a4);
+  box-shadow:
+    0 0 0 3px rgba(77, 215, 209, 0.18),
+    0 2px 5px rgba(0, 0, 0, 0.22);
+  flex-shrink: 0;
 }
 
 .cf-node__label {
@@ -987,18 +1000,23 @@ body {
   font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(11, 22, 37, 0.44);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(247, 251, 255, 0.92);
+  font-weight: 700;
 }
 
 .cf-node__risk-pill.is-medium {
-  background: rgba(246, 211, 101, 0.18);
-  color: #f6d365;
+  background: rgba(124, 94, 22, 0.82);
+  border-color: rgba(246, 211, 101, 0.44);
+  color: #fff8e6;
 }
 
 .cf-node__risk-pill.is-high,
 .cf-node__risk-pill.is-critical {
-  background: rgba(240, 106, 95, 0.18);
-  color: #f06a5f;
+  background: rgba(122, 33, 41, 0.88);
+  border-color: rgba(240, 106, 95, 0.42);
+  color: #fff4f3;
 }
 
 .cf-node__risk-list,
@@ -1138,6 +1156,7 @@ body {
 
 .cf-node__test-pill.is-failed {
   background: rgba(240, 106, 95, 0.18);
+  color: #fff4f3;
 }
 
 .cf-node__glyph,
@@ -1198,10 +1217,55 @@ body {
 }
 
 .cf-handle {
-  width: 10px;
-  height: 10px;
-  border: 2px solid rgba(255, 255, 255, 0.68);
-  background: rgba(255, 255, 255, 0.18);
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.86);
+  background: rgba(10, 22, 39, 0.94);
+  box-shadow:
+    0 0 0 3px rgba(8, 17, 30, 0.34),
+    0 2px 4px rgba(0, 0, 0, 0.22);
+}
+
+.cf-node-symbol--function .cf-handle,
+.cf-node-symbol--method .cf-handle {
+  background: rgba(78, 18, 31, 0.96);
+}
+
+.cf-node-symbol--function .cf-node__label,
+.cf-node-symbol--function .cf-node__caption,
+.cf-node-symbol--function .cf-node__footer,
+.cf-node-symbol--function .cf-node__body,
+.cf-node-symbol--function .cf-node__test-card-label,
+.cf-node-symbol--function .cf-node__test-card-name,
+.cf-node-symbol--function .cf-node__test-card-stats span,
+.cf-node-symbol--function .cf-node__risk-item,
+.cf-node-symbol--function .cf-node__test-link,
+.cf-node-symbol--function .cf-node__mapping-more,
+.cf-node-symbol--method .cf-node__label,
+.cf-node-symbol--method .cf-node__caption,
+.cf-node-symbol--method .cf-node__footer,
+.cf-node-symbol--method .cf-node__body,
+.cf-node-symbol--method .cf-node__test-card-label,
+.cf-node-symbol--method .cf-node__test-card-name,
+.cf-node-symbol--method .cf-node__test-card-stats span,
+.cf-node-symbol--method .cf-node__risk-item,
+.cf-node-symbol--method .cf-node__test-link,
+.cf-node-symbol--method .cf-node__mapping-more {
+  color: rgba(255, 246, 246, 0.92);
+}
+
+.cf-node-symbol--function .cf-node__label,
+.cf-node-symbol--function .cf-node__pill,
+.cf-node-symbol--method .cf-node__label,
+.cf-node-symbol--method .cf-node__pill {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.26);
+}
+
+.cf-node-symbol--function .cf-node__pill,
+.cf-node-symbol--method .cf-node__pill {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: rgba(255, 247, 247, 0.96);
 }
 
 .empty-state {
