@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "graphs": {
+    "folder:/Users/jalendarreddy/Downloads/visualCode/code-visual/src": {
+      "savedAt": 1776212715325,
+      "graphPath": "/Users/jalendarreddy/Downloads/visualCode/code-visual/src",
+      "graphType": "folder",
+      "activeTab": "settings",
+      "layout": "hierarchical",
+      "overlayMode": "none",
+      "visibility": {
+        "folders": true,
+        "files": true,
+        "symbols": true,
+        "tests": true,
+        "modules": false,
+        "imports": false,
+        "calls": true,
+        "testFlow": true,
+        "dataFlow": true
+      },
+      "searchQuery": "",
+      "expandedNodeIds": [
+        "folder:/Users/jalendarreddy/Downloads/visualCode/code-visual/src",
+        "folder:/Users/jalendarreddy/Downloads/visualCode/code-visual/src/webview",
+        "folder:/Users/jalendarreddy/Downloads/visualCode/code-visual/src/types",
+        "folder:/Users/jalendarreddy/Downloads/visualCode/code-visual/src/analysis"
+      ],
+      "viewport": {
+        "x": 0,
+        "y": 0,
+        "zoom": 1
+      },
+      "aiAnalyses": {}
+    }
+  }
+}

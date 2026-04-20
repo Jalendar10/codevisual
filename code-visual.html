@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code Visual — Class &amp; Data Flow Analyzer</title>
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --surface2: #21262d; --border: #30363d;
+  --text: #e6edf3; --text2: #8b949e; --accent: #58a6ff; --green: #3fb950;
+  --orange: #d29922; --red: #f85149; --purple: #bc8cff; --pink: #f778ba;
+  --cyan: #39d2c0; --yellow: #e3b341;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); overflow: hidden; height: 100vh; }
+#app { display: grid; grid-template-columns: 280px 1fr 360px; grid-template-rows: 48px 1fr; height: 100vh; }
+header { grid-column: 1/-1; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 12px; z-index: 100; }
+header h1 { font-size: 15px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+header .sep { width: 1px; height: 24px; background: var(--border); }
+.toolbar { display: flex; gap: 6px; }
+.toolbar button, .file-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 5px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+.toolbar button:hover, .file-btn:hover { background: var(--border); border-color: var(--accent); }
+.toolbar button.active { background: rgba(88,166,255,.15); border-color: var(--accent); color: var(--accent); }
+#sidebar { background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; }
+#canvas-wrap { position: relative; overflow: hidden; background: var(--bg); }
+#mainCanvas { display: block; width: 100%; height: 100%; }
+#rightPanel { background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto; display: flex; flex-direction: column; }
+.panel-section { padding: 12px; border-bottom: 1px solid var(--border); }
+.panel-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: var(--text2); margin-bottom: 8px; }
+.class-node-item { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: background .1s; display: flex; align-items: center; gap: 6px; }
+.class-node-item:hover { background: var(--surface2); }
+.class-node-item.selected { background: rgba(88,166,255,.15); color: var(--accent); }
+.class-node-item .icon { width: 18px; height: 18px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; }
+.icon-class { background: rgba(88,166,255,.2); color: var(--accent); }
+.icon-interface { background: rgba(188,140,255,.2); color: var(--purple); }
+.icon-enum { background: rgba(210,153,34,.2); color: var(--orange); }
+.icon-sql { background: rgba(57,210,192,.2); color: var(--cyan); }
+.icon-service { background: rgba(63,185,80,.2); color: var(--green); }
+.method-item { padding: 3px 8px 3px 32px; font-size: 12px; color: var(--text2); cursor: pointer; border-radius: 4px; }
+.method-item:hover { background: var(--surface2); color: var(--text); }
+.method-item.highlighted { background: rgba(247,120,186,.15); color: var(--pink); }
+.tab-bar { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+.tab-bar button { flex: 1; padding: 8px 4px; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text2); font-size: 11px; font-weight: 600; cursor: pointer; transition: all .15s; }
+.tab-bar button:hover { color: var(--text); background: var(--surface2); }
+.tab-bar button.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-content { flex: 1; overflow-y: auto; padding: 12px; }
+.tab-content.hidden { display: none; }
+.suggestion-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.suggestion-card .label { font-size: 11px; font-weight: 700; color: var(--accent); margin-bottom: 4px; }
+.suggestion-card .desc { font-size: 12px; color: var(--text2); margin-bottom: 8px; line-height: 1.5; }
+.suggestion-card .original { background: rgba(248,81,73,.1); border-left: 3px solid var(--red); padding: 6px 10px; border-radius: 0 4px 4px 0; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; margin-bottom: 6px; color: var(--red); white-space: pre-wrap; word-break: break-all; }
+.suggestion-card .suggest { background: rgba(63,185,80,.1); border-left: 3px solid var(--green); padding: 6px 10px; border-radius: 0 4px 4px 0; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; color: var(--green); white-space: pre-wrap; word-break: break-all; }
+.test-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.test-card .type { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; padding: 2px 6px; border-radius: 4px; display: inline-block; margin-bottom: 4px; }
+.test-card .type.unit { background: rgba(88,166,255,.15); color: var(--accent); }
+.test-card .type.integration { background: rgba(188,140,255,.15); color: var(--purple); }
+.test-card .type.edge { background: rgba(210,153,34,.15); color: var(--orange); }
+.test-card .type.negative { background: rgba(248,81,73,.15); color: var(--red); }
+.test-card .type.boundary { background: rgba(57,210,192,.15); color: var(--cyan); }
+.test-card .type.perf { background: rgba(247,120,186,.15); color: var(--pink); }
+.test-card .name { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.test-card .detail { font-size: 12px; color: var(--text2); line-height: 1.4; }
+.flow-info { font-size: 12px; color: var(--text2); line-height: 1.6; padding: 8px; }
+.flow-info .from { color: var(--accent); font-weight: 600; }
+.flow-info .to { color: var(--green); font-weight: 600; }
+.flow-info .arrow { color: var(--orange); }
+.popout-btn { background: none; border: 1px solid var(--border); color: var(--text2); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+.popout-btn:hover { background: var(--surface2); color: var(--accent); border-color: var(--accent); }
+.file-input-wrap { position: relative; }
+.file-input-wrap input[type=file] { position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.zoom-controls { position: absolute; bottom: 12px; right: 12px; display: flex; gap: 4px; z-index: 10; }
+.zoom-controls button { width: 32px; height: 32px; background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+.zoom-controls button:hover { background: var(--surface2); border-color: var(--accent); }
+.minimap { position: absolute; bottom: 12px; left: 12px; width: 160px; height: 100px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; z-index: 10; overflow: hidden; }
+#minimapCanvas { width: 100%; height: 100%; }
+.stats-bar { position: absolute; top: 8px; left: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 11px; color: var(--text2); z-index: 10; display: flex; gap: 12px; }
+.stats-bar span { display: flex; align-items: center; gap: 4px; }
+.stats-bar .dot { width: 6px; height: 6px; border-radius: 50%; }
+.legend { position: absolute; top: 8px; right: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; z-index: 10; font-size: 11px; }
+.legend-item { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; color: var(--text2); }
+.legend-line { width: 20px; height: 2px; border-radius: 1px; }
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text2); text-align: center; padding: 40px; }
+.empty-state .big-icon { font-size: 48px; margin-bottom: 16px; opacity: .5; }
+.empty-state p { font-size: 13px; line-height: 1.6; max-width: 300px; }
+.search-box { width: 200px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 12px; outline: none; }
+.search-box:focus { border-color: var(--accent); }
+.search-box::placeholder { color: var(--text2); }
+textarea.code-input { width: 100%; height: 200px; background: var(--bg); border: 1px solid var(--border); color: var(--text); font-family: 'Cascadia Code','Fira Code',monospace; font-size: 12px; padding: 10px; border-radius: 6px; resize: vertical; outline: none; }
+textarea.code-input:focus { border-color: var(--accent); }
+.drop-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 20px; text-align: center; color: var(--text2); font-size: 12px; cursor: pointer; transition: all .2s; margin-bottom: 8px; }
+.drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); background: rgba(88,166,255,.05); }
+.mapping-count { background: var(--surface2); padding: 1px 6px; border-radius: 10px; font-size: 10px; color: var(--text2); margin-left: auto; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+.suggestion-card, .test-card { animation: fadeIn .2s ease; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>&#x2B22; Code Visual</h1>
+    <div class="sep"></div>
+    <div class="toolbar">
+      <div class="file-input-wrap">
+        <button class="file-btn">&#128194; Load Files</button>
+        <input type="file" id="fileInput" multiple accept=".java,.py,.sql,.kt,.cs,.ts,.js,.go,.rb,.php,.scala,.rs">
+      </div>
+      <button id="pasteBtn">&#128203; Paste Code</button>
+      <button id="sampleBtn">&#9733; Load Sample</button>
+    </div>
+    <div class="sep"></div>
+    <div class="toolbar">
+      <button id="flowBtn" class="active">&#8644; Data Flow</button>
+      <button id="depBtn">&#128279; Dependencies</button>
+      <button id="sqlBtn">&#128451; SQL Map</button>
+    </div>
+    <div class="sep"></div>
+    <input type="text" class="search-box" id="searchBox" placeholder="Search classes, methods...">
+    <div style="margin-left:auto; display:flex; gap:6px;">
+      <button class="popout-btn" id="popoutBtn" title="Pop out to new window">&#8599;</button>
+    </div>
+  </header>
+
+  <div id="sidebar">
+    <div class="panel-section">
+      <div class="panel-title">Explorer</div>
+      <div id="classTree"></div>
+    </div>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="mainCanvas"></canvas>
+    <div class="stats-bar" id="statsBar">
+      <span><span class="dot" style="background:var(--accent)"></span> Classes: <b id="statClasses">0</b></span>
+      <span><span class="dot" style="background:var(--green)"></span> Methods: <b id="statMethods">0</b></span>
+      <span><span class="dot" style="background:var(--orange)"></span> Flows: <b id="statFlows">0</b></span>
+      <span><span class="dot" style="background:var(--cyan)"></span> SQL: <b id="statSql">0</b></span>
+    </div>
+    <div class="legend" id="legend">
+      <div class="legend-item"><span class="legend-line" style="background:var(--accent)"></span> Method Call</div>
+      <div class="legend-item"><span class="legend-line" style="background:var(--green)"></span> Inheritance</div>
+      <div class="legend-item"><span class="legend-line" style="background:var(--orange)"></span> Implementation</div>
+      <div class="legend-item"><span class="legend-line" style="background:var(--purple)"></span> Data Transform</div>
+      <div class="legend-item"><span class="legend-line" style="background:var(--cyan)"></span> SQL Query</div>
+      <div class="legend-item"><span class="legend-line" style="background:var(--pink)"></span> Dependency Inject</div>
+    </div>
+    <div class="minimap"><canvas id="minimapCanvas"></canvas></div>
+    <div class="zoom-controls">
+      <button id="zoomIn">+</button>
+      <button id="zoomOut">&minus;</button>
+      <button id="zoomFit">&#9633;</button>
+    </div>
+  </div>
+
+  <div id="rightPanel">
+    <div class="tab-bar">
+      <button class="active" data-tab="flow">Flow</button>
+      <button data-tab="tests">Tests</button>
+      <button data-tab="analysis">Analysis</button>
+    </div>
+    <div class="tab-content" id="tab-flow">
+      <div class="panel-title">Data Flow Details</div>
+      <div id="flowDetails" class="flow-info">
+        <div class="empty-state"><div class="big-icon">&#8644;</div><p>Click a node or method to see data flow mappings across classes</p></div>
+      </div>
+    </div>
+    <div class="tab-content hidden" id="tab-tests">
+      <div class="panel-title">Generated Test Cases</div>
+      <div id="testCases">
+        <div class="empty-state"><div class="big-icon">&#9745;</div><p>Select a class or method, then test cases covering 120%+ scenarios will appear here</p></div>
+      </div>
+    </div>
+    <div class="tab-content hidden" id="tab-analysis">
+      <div class="panel-title">AI Suggestions</div>
+      <div id="aiSuggestions">
+        <div class="empty-state"><div class="big-icon">&#9881;</div><p>Load code and select elements to get deep AI analysis with structured suggestions</p></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Paste Modal -->
+<div id="pasteModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:1000; display:none; align-items:center; justify-content:center;">
+  <div style="background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px; width:700px; max-height:80vh; overflow-y:auto;">
+    <h3 style="font-size:15px; margin-bottom:12px;">Paste Your Code</h3>
+    <p style="font-size:12px; color:var(--text2); margin-bottom:12px;">Paste one or more files. Separate files with <code>// --- FILE: filename.java ---</code></p>
+    <textarea class="code-input" id="codeTextarea" placeholder="Paste Java, Python, SQL, or any code here..."></textarea>
+    <div style="display:flex; gap:8px; margin-top:12px; justify-content:flex-end;">
+      <button class="toolbar" onclick="closePasteModal()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 16px;border-radius:6px;cursor:pointer;">Cancel</button>
+      <button onclick="parseFromTextarea()" style="background:var(--accent);border:none;color:#000;padding:6px 16px;border-radius:6px;cursor:pointer;font-weight:600;">Analyze Code</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ==================== STATE ====================
+const state = {
+  classes: [], // { id, name, type, language, methods:[], fields:[], extends, implements:[], x, y, w, h, sql:[], file }
+  edges: [],   // { from, to, fromMethod, toMethod, type, label }
+  sqlNodes: [],
+  selectedNode: null,
+  selectedMethod: null,
+  highlightedEdges: new Set(),
+  highlightedNodes: new Set(),
+  camera: { x: 0, y: 0, zoom: 1 },
+  drag: null,
+  pan: null,
+  viewMode: 'flow', // flow, deps, sql
+  animFrame: null,
+  needsRender: true,
+};
+
+const EDGE_COLORS = {
+  call: '#58a6ff', inherit: '#3fb950', implement: '#d29922',
+  transform: '#bc8cff', sql: '#39d2c0', inject: '#f778ba',
+  dependency: '#8b949e', data: '#e3b341'
+};
+const NODE_COLORS = {
+  class: '#58a6ff', interface: '#bc8cff', enum: '#d29922',
+  abstract: '#f778ba', service: '#3fb950', repository: '#39d2c0',
+  controller: '#e3b341', sql: '#39d2c0', entity: '#f85149', dto: '#d29922',
+  impl: '#3fb950', config: '#8b949e', default: '#58a6ff'
+};
+
+// ==================== CANVAS ====================
+const canvas = document.getElementById('mainCanvas');
+const ctx = canvas.getContext('2d');
+const mmCanvas = document.getElementById('minimapCanvas');
+const mmCtx = mmCanvas.getContext('2d');
+let W, H;
+
+function resize() {
+  const wrap = document.getElementById('canvas-wrap');
+  W = wrap.clientWidth; H = wrap.clientHeight;
+  canvas.width = W * devicePixelRatio; canvas.height = H * devicePixelRatio;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  mmCanvas.width = 160 * devicePixelRatio; mmCanvas.height = 100 * devicePixelRatio;
+  mmCtx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  state.needsRender = true;
+}
+window.addEventListener('resize', resize);
+
+// ==================== PARSER ====================
+function parseCode(text, filename) {
+  const lang = detectLanguage(text, filename);
+  const classes = [];
+  const edges = [];
+  const sqls = [];
+
+  if (lang === 'java' || lang === 'kotlin' || lang === 'csharp' || lang === 'typescript' || lang === 'scala') {
+    parseCLike(text, lang, filename, classes, edges, sqls);
+  } else if (lang === 'python') {
+    parsePython(text, filename, classes, edges, sqls);
+  } else if (lang === 'sql') {
+    parseSql(text, filename, sqls, classes);
+  } else {
+    parseCLike(text, lang, filename, classes, edges, sqls);
+  }
+  return { classes, edges, sqls };
+}
+
+function detectLanguage(text, filename) {
+  if (!filename) filename = '';
+  const ext = filename.split('.').pop().toLowerCase();
+  const map = { java:'java', py:'python', sql:'sql', kt:'kotlin', cs:'csharp', ts:'typescript', js:'javascript', go:'go', rb:'ruby', php:'php', scala:'scala', rs:'rust' };
+  if (map[ext]) return map[ext];
+  if (text.includes('public class ') || text.includes('private class ') || text.includes('@Override')) return 'java';
+  if (text.includes('def ') && text.includes('self')) return 'python';
+  if (/\b(SELECT|INSERT|UPDATE|DELETE|CREATE TABLE)\b/i.test(text)) return 'sql';
+  return 'java';
+}
+
+function parseCLike(text, lang, filename, classes, edges, sqls) {
+  // Class/Interface/Enum detection
+  const classRe = /(?:(?:public|private|protected|abstract|static|final|@\w+\s*(?:\([^)]*\))?\s*)*)(class|interface|enum|abstract\s+class|record)\s+(\w+)(?:\s*<[^>]+>)?(?:\s+extends\s+(\w+))?(?:\s+implements\s+([\w\s,<>]+))?/g;
+  let m;
+  while ((m = classRe.exec(text)) !== null) {
+    const kind = m[1].replace('abstract ', '');
+    const name = m[2];
+    const ext = m[3] || null;
+    const impls = m[4] ? m[4].split(',').map(s => s.trim().replace(/<.*>/, '')) : [];
+    const cls = { id: 'c_' + name + '_' + Math.random().toString(36).substr(2,4), name, type: classifyType(name, kind), language: lang, methods: [], fields: [], extends: ext, implements: impls, file: filename, sql: [] };
+
+    // Extract methods
+    const block = extractBlock(text, m.index);
+    const methRe = /(?:(?:public|private|protected|static|final|synchronized|abstract|default|override|@\w+\s*(?:\([^)]*\))?\s*)*)\s*(?:[\w<>\[\],\s]+?)\s+(\w+)\s*\(([^)]*)\)/g;
+    let mm;
+    while ((mm = methRe.exec(block)) !== null) {
+      if (!['if','for','while','switch','catch','return','new','class','interface','enum'].includes(mm[1])) {
+        const params = mm[2] ? mm[2].split(',').map(p => p.trim()).filter(Boolean) : [];
+        cls.methods.push({ name: mm[1], params, returnType: 'void' });
+      }
+    }
+
+    // Extract fields
+    const fieldRe = /(?:private|protected|public)\s+(?:static\s+)?(?:final\s+)?([\w<>\[\]]+)\s+(\w+)\s*[;=]/g;
+    while ((mm = fieldRe.exec(block)) !== null) {
+      cls.fields.push({ type: mm[1], name: mm[2] });
+    }
+
+    // SQL in strings
+    const sqlRe = /["'`]((?:SELECT|INSERT|UPDATE|DELETE|CREATE)\s[^"'`]{10,})["'`]/gi;
+    while ((mm = sqlRe.exec(block)) !== null) {
+      const sqlText = mm[1].trim();
+      cls.sql.push(sqlText);
+      sqls.push({ text: sqlText, className: name, file: filename });
+    }
+
+    // @Query annotations
+    const queryRe = /@Query\s*\(\s*(?:value\s*=\s*)?["'`](.*?)["'`]/gs;
+    while ((mm = queryRe.exec(block)) !== null) {
+      cls.sql.push(mm[1].trim());
+      sqls.push({ text: mm[1].trim(), className: name, file: filename });
+    }
+
+    if (ext) edges.push({ from: name, to: ext, type: kind === 'interface' ? 'inherit' : 'inherit', label: 'extends' });
+    impls.forEach(i => edges.push({ from: name, to: i, type: 'implement', label: 'implements' }));
+
+    classes.push(cls);
+  }
+
+  // Detect method calls between classes
+  for (const cls of classes) {
+    const block = findClassBlock(text, cls.name);
+    for (const other of classes) {
+      if (other.name === cls.name) continue;
+      for (const om of other.methods) {
+        const callRe = new RegExp(`\\b\\w+\\.${om.name}\\s*\\(`, 'g');
+        if (callRe.test(block)) {
+          const callerMethods = cls.methods.filter(cm => {
+            const mBlock = findMethodInBlock(block, cm.name);
+            return mBlock && new RegExp(`\\b\\w+\\.${om.name}\\s*\\(`).test(mBlock);
+          });
+          if (callerMethods.length > 0) {
+            callerMethods.forEach(cm => {
+              edges.push({ from: cls.name, to: other.name, fromMethod: cm.name, toMethod: om.name, type: detectEdgeType(cls, other), label: `${cm.name} → ${om.name}` });
+            });
+          } else {
+            edges.push({ from: cls.name, to: other.name, type: detectEdgeType(cls, other), label: `calls ${om.name}` });
+          }
+        }
+      }
+      // Field injection
+      for (const f of cls.fields) {
+        if (f.type === other.name || f.type.includes(other.name)) {
+          edges.push({ from: cls.name, to: other.name, type: 'inject', label: `injects ${f.name}` });
+        }
+      }
+    }
+  }
+}
+
+function parsePython(text, filename, classes, edges, sqls) {
+  const classRe = /class\s+(\w+)(?:\(([^)]*)\))?/g;
+  let m;
+  while ((m = classRe.exec(text)) !== null) {
+    const name = m[1];
+    const parents = m[2] ? m[2].split(',').map(s => s.trim().replace(/\(.*\)/, '')) : [];
+    const cls = { id: 'c_' + name + '_' + Math.random().toString(36).substr(2,4), name, type: classifyType(name, 'class'), language: 'python', methods: [], fields: [], extends: parents[0] || null, implements: parents.slice(1), file: filename, sql: [] };
+
+    const block = extractPythonBlock(text, m.index);
+    const methRe = /def\s+(\w+)\s*\(([^)]*)\)/g;
+    let mm;
+    while ((mm = methRe.exec(block)) !== null) {
+      const params = mm[2].split(',').map(p => p.trim().split(':')[0].trim()).filter(p => p && p !== 'self' && p !== 'cls');
+      cls.methods.push({ name: mm[1], params, returnType: '' });
+    }
+
+    const sqlRe = /["']{1,3}((?:SELECT|INSERT|UPDATE|DELETE|CREATE)\s[\s\S]{10,?})["']{1,3}/gi;
+    while ((mm = sqlRe.exec(block)) !== null) {
+      cls.sql.push(mm[1].trim());
+      sqls.push({ text: mm[1].trim(), className: name, file: filename });
+    }
+
+    parents.forEach(p => { if (p && p !== 'object') edges.push({ from: name, to: p, type: 'inherit', label: 'inherits' }); });
+    classes.push(cls);
+  }
+
+  // Cross-class calls
+  for (const cls of classes) {
+    const block = extractPythonBlock(text, text.indexOf('class ' + cls.name));
+    for (const other of classes) {
+      if (other.name === cls.name) continue;
+      for (const om of other.methods) {
+        if (block.includes('.' + om.name + '(')) {
+          edges.push({ from: cls.name, to: other.name, type: 'call', label: `calls ${om.name}` });
+        }
+      }
+    }
+  }
+}
+
+function parseSql(text, filename, sqls, classes) {
+  const stmts = text.split(';').filter(s => s.trim());
+  const sqlClass = { id: 'c_SQL_' + Math.random().toString(36).substr(2,4), name: filename || 'SQL Queries', type: 'sql', language: 'sql', methods: [], fields: [], extends: null, implements: [], file: filename, sql: [] };
+  stmts.forEach((stmt, i) => {
+    const s = stmt.trim();
+    if (!s) return;
+    const type = s.match(/^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE\s+TABLE|ALTER|DROP)/i);
+    if (type) {
+      const tables = extractTables(s);
+      sqlClass.methods.push({ name: `${type[1].toUpperCase()}_${i+1}`, params: tables, returnType: type[1].toUpperCase() });
+      sqlClass.sql.push(s);
+      sqls.push({ text: s, className: sqlClass.name, file: filename, tables });
+    }
+  });
+  if (sqlClass.methods.length > 0) classes.push(sqlClass);
+}
+
+function extractTables(sql) {
+  const tables = new Set();
+  const re = /\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:`|"|')?(\w+)/gi;
+  let m;
+  while ((m = re.exec(sql)) !== null) tables.add(m[1]);
+  return [...tables];
+}
+
+function classifyType(name, kind) {
+  const n = name.toLowerCase();
+  if (kind === 'interface') return 'interface';
+  if (kind === 'enum') return 'enum';
+  if (n.includes('service') && n.includes('impl')) return 'impl';
+  if (n.includes('service')) return 'service';
+  if (n.includes('repository') || n.includes('repo') || n.includes('dao')) return 'repository';
+  if (n.includes('controller') || n.includes('resource') || n.includes('endpoint')) return 'controller';
+  if (n.includes('entity') || n.includes('model') || n.includes('domain')) return 'entity';
+  if (n.includes('dto') || n.includes('request') || n.includes('response') || n.includes('vo')) return 'dto';
+  if (n.includes('config') || n.includes('configuration')) return 'config';
+  return 'class';
+}
+
+function detectEdgeType(from, to) {
+  if (to.type === 'repository' || to.type === 'sql') return 'sql';
+  if (from.type === 'controller' && to.type === 'service') return 'call';
+  if (from.type === 'service' && to.type === 'repository') return 'call';
+  if (to.type === 'dto' || to.type === 'entity') return 'transform';
+  return 'call';
+}
+
+function extractBlock(text, startIdx) {
+  let depth = 0; let start = text.indexOf('{', startIdx);
+  if (start === -1) return text.substring(startIdx, Math.min(startIdx + 2000, text.length));
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    if (text[i] === '}') { depth--; if (depth === 0) return text.substring(start, i + 1); }
+  }
+  return text.substring(start);
+}
+
+function extractPythonBlock(text, startIdx) {
+  const lines = text.substring(startIdx).split('\n');
+  if (lines.length < 2) return lines.join('\n');
+  const indent = (lines[1].match(/^(\s*)/) || ['',''])[1].length;
+  let end = 1;
+  for (let i = 2; i < lines.length; i++) {
+    const lineIndent = (lines[i].match(/^(\s*)/) || ['',''])[1].length;
+    if (lines[i].trim() && lineIndent < indent && !lines[i].trim().startsWith('#') && !lines[i].trim().startsWith('@')) break;
+    end = i;
+  }
+  return lines.slice(0, end + 1).join('\n');
+}
+
+function findClassBlock(text, className) {
+  const idx = text.search(new RegExp(`\\b(class|interface|enum)\\s+${className}\\b`));
+  return idx >= 0 ? extractBlock(text, idx) : '';
+}
+
+function findMethodInBlock(block, methodName) {
+  const idx = block.search(new RegExp(`\\b${methodName}\\s*\\(`));
+  if (idx < 0) return null;
+  return extractBlock(block, idx);
+}
+
+// ==================== LAYOUT ====================
+function layoutNodes() {
+  const N = state.classes.length;
+  if (N === 0) return;
+
+  // Group by type for layered layout
+  const layers = { controller: [], service: [], impl: [], repository: [], entity: [], dto: [], interface: [], sql: [], enum: [], config: [], class: [], default: [] };
+  state.classes.forEach(c => { (layers[c.type] || layers['default']).push(c); });
+
+  const layerOrder = ['controller', 'service', 'impl', 'repository', 'sql', 'interface', 'entity', 'dto', 'enum', 'config', 'class', 'default'];
+  let y = 60;
+  for (const layerName of layerOrder) {
+    const nodes = layers[layerName];
+    if (!nodes || nodes.length === 0) continue;
+    const totalWidth = nodes.reduce((sum, n) => sum + getNodeWidth(n) + 30, 0);
+    let x = Math.max(60, (W - totalWidth) / 2);
+    nodes.forEach(n => {
+      n.w = getNodeWidth(n);
+      n.h = getNodeHeight(n);
+      n.x = x;
+      n.y = y;
+      x += n.w + 30;
+    });
+    y += Math.max(...nodes.map(n => n.h)) + 50;
+  }
+
+  // Force-directed refinement (few iterations for speed)
+  for (let iter = 0; iter < 60; iter++) {
+    for (const a of state.classes) {
+      let fx = 0, fy = 0;
+      for (const b of state.classes) {
+        if (a === b) continue;
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+        let repulse = 8000 / (dist * dist);
+        fx += (dx / dist) * repulse;
+        fy += (dy / dist) * repulse;
+      }
+      for (const e of state.edges) {
+        let other = null;
+        if (e.from === a.name) other = state.classes.find(c => c.name === e.to);
+        if (e.to === a.name) other = state.classes.find(c => c.name === e.from);
+        if (other) {
+          let dx = other.x - a.x, dy = other.y - a.y;
+          let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+          let attract = dist * 0.003;
+          fx += (dx / dist) * attract;
+          fy += (dy / dist) * attract;
+        }
+      }
+      a.x += Math.max(-5, Math.min(5, fx));
+      a.y += Math.max(-5, Math.min(5, fy));
+    }
+  }
+  state.needsRender = true;
+}
+
+function getNodeWidth(cls) { return Math.max(180, cls.name.length * 9 + 40, ...cls.methods.map(m => m.name.length * 7 + 60)); }
+function getNodeHeight(cls) { return 38 + cls.methods.length * 20 + (cls.sql.length > 0 ? 20 : 0) + 8; }
+
+// ==================== RENDERING ====================
+function render() {
+  if (!state.needsRender) { requestAnimationFrame(render); return; }
+  state.needsRender = false;
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(state.camera.x, state.camera.y);
+  ctx.scale(state.camera.zoom, state.camera.zoom);
+
+  // Draw grid
+  drawGrid();
+
+  // Draw edges
+  drawEdges();
+
+  // Draw nodes
+  state.classes.forEach(cls => drawNode(cls));
+
+  ctx.restore();
+  renderMinimap();
+  requestAnimationFrame(render);
+}
+
+function drawGrid() {
+  const gridSize = 40;
+  const startX = Math.floor(-state.camera.x / state.camera.zoom / gridSize) * gridSize - gridSize;
+  const startY = Math.floor(-state.camera.y / state.camera.zoom / gridSize) * gridSize - gridSize;
+  const endX = startX + W / state.camera.zoom + gridSize * 2;
+  const endY = startY + H / state.camera.zoom + gridSize * 2;
+  ctx.strokeStyle = '#1a1f27'; ctx.lineWidth = 0.5;
+  for (let x = startX; x < endX; x += gridSize) { ctx.beginPath(); ctx.moveTo(x, startY); ctx.lineTo(x, endY); ctx.stroke(); }
+  for (let y = startY; y < endY; y += gridSize) { ctx.beginPath(); ctx.moveTo(startX, y); ctx.lineTo(endX, y); ctx.stroke(); }
+}
+
+function drawEdges() {
+  for (const edge of state.edges) {
+    const fromNode = state.classes.find(c => c.name === edge.from);
+    const toNode = state.classes.find(c => c.name === edge.to);
+    if (!fromNode || !toNode) continue;
+
+    const highlighted = state.highlightedEdges.has(edge);
+    const dimmed = state.highlightedEdges.size > 0 && !highlighted;
+    const color = EDGE_COLORS[edge.type] || EDGE_COLORS.call;
+
+    ctx.globalAlpha = dimmed ? 0.08 : (highlighted ? 1 : 0.4);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = highlighted ? 2.5 : 1.2;
+
+    let fromY = fromNode.y + fromNode.h / 2;
+    let toY = toNode.y + toNode.h / 2;
+    if (edge.fromMethod) {
+      const mi = fromNode.methods.findIndex(m => m.name === edge.fromMethod);
+      if (mi >= 0) fromY = fromNode.y + 38 + mi * 20 + 10;
+    }
+    if (edge.toMethod) {
+      const mi = toNode.methods.findIndex(m => m.name === edge.toMethod);
+      if (mi >= 0) toY = toNode.y + 38 + mi * 20 + 10;
+    }
+
+    const fromX = fromNode.x + fromNode.w;
+    const toX = toNode.x;
+    const cpx = (fromX + toX) / 2;
+
+    ctx.beginPath();
+    ctx.moveTo(fromX, fromY);
+    ctx.bezierCurveTo(cpx, fromY, cpx, toY, toX, toY);
+    ctx.stroke();
+
+    // Arrow
+    if (highlighted || state.highlightedEdges.size === 0) {
+      const t = 0.95;
+      const ax = bezierPoint(fromX, cpx, cpx, toX, t);
+      const ay = bezierPoint(fromY, fromY, toY, toY, t);
+      const bx = bezierPoint(fromX, cpx, cpx, toX, t - 0.03);
+      const by = bezierPoint(fromY, fromY, toY, toY, t - 0.03);
+      const angle = Math.atan2(ay - by, ax - bx);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(toX, toY);
+      ctx.lineTo(toX - 8 * Math.cos(angle - 0.4), toY - 8 * Math.sin(angle - 0.4));
+      ctx.lineTo(toX - 8 * Math.cos(angle + 0.4), toY - 8 * Math.sin(angle + 0.4));
+      ctx.fill();
+    }
+
+    // Label
+    if (highlighted && edge.label) {
+      const mx = bezierPoint(fromX, cpx, cpx, toX, 0.5);
+      const my = bezierPoint(fromY, fromY, toY, toY, 0.5);
+      ctx.font = '10px system-ui'; ctx.fillStyle = color; ctx.textAlign = 'center';
+      ctx.fillRect(mx - ctx.measureText(edge.label).width/2 - 4, my - 14, ctx.measureText(edge.label).width + 8, 16);
+      ctx.fillStyle = '#0d1117';
+      ctx.fillText(edge.label, mx, my - 4);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function bezierPoint(p0, p1, p2, p3, t) {
+  const t2 = t*t, t3 = t2*t;
+  return (1-t)*(1-t)*(1-t)*p0 + 3*(1-t)*(1-t)*t*p1 + 3*(1-t)*t2*p2 + t3*p3;
+}
+
+function drawNode(cls) {
+  const selected = state.selectedNode === cls;
+  const highlighted = state.highlightedNodes.has(cls.name);
+  const dimmed = state.highlightedNodes.size > 0 && !highlighted && !selected;
+  const color = NODE_COLORS[cls.type] || NODE_COLORS.default;
+
+  ctx.globalAlpha = dimmed ? 0.15 : 1;
+
+  // Shadow
+  if (selected || highlighted) {
+    ctx.shadowColor = color; ctx.shadowBlur = 12; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+  }
+
+  // Background
+  ctx.fillStyle = '#161b22';
+  ctx.strokeStyle = selected ? color : (highlighted ? color : '#30363d');
+  ctx.lineWidth = selected ? 2 : (highlighted ? 1.5 : 1);
+  roundRect(ctx, cls.x, cls.y, cls.w, cls.h, 8);
+  ctx.fill(); ctx.stroke();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  // Header
+  ctx.fillStyle = color + '18';
+  roundRectTop(ctx, cls.x, cls.y, cls.w, 32, 8);
+  ctx.fill();
+  ctx.strokeStyle = color + '30'; ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.moveTo(cls.x, cls.y + 32); ctx.lineTo(cls.x + cls.w, cls.y + 32); ctx.stroke();
+
+  // Type badge
+  const badge = cls.type.charAt(0).toUpperCase();
+  ctx.fillStyle = color; ctx.font = 'bold 10px system-ui';
+  ctx.beginPath(); ctx.arc(cls.x + 16, cls.y + 16, 9, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#0d1117'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(badge, cls.x + 16, cls.y + 16.5);
+
+  // Class name
+  ctx.fillStyle = color; ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(cls.name, cls.x + 30, cls.y + 16);
+
+  // Language tag
+  ctx.fillStyle = '#8b949e'; ctx.font = '9px system-ui'; ctx.textAlign = 'right';
+  ctx.fillText(cls.language, cls.x + cls.w - 8, cls.y + 16);
+
+  // Methods
+  cls.methods.forEach((m, i) => {
+    const my = cls.y + 38 + i * 20;
+    const isMethodHighlighted = state.selectedMethod && state.selectedNode === cls && state.selectedMethod === m.name;
+    const isInFlow = state.highlightedEdges.size > 0 && [...state.highlightedEdges].some(e => (e.fromMethod === m.name && e.from === cls.name) || (e.toMethod === m.name && e.to === cls.name));
+
+    if (isMethodHighlighted || isInFlow) {
+      ctx.fillStyle = color + '15';
+      ctx.fillRect(cls.x + 2, my - 2, cls.w - 4, 18);
+    }
+
+    // Method icon
+    ctx.fillStyle = isMethodHighlighted || isInFlow ? color : '#8b949e';
+    ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('▸', cls.x + 10, my + 8);
+
+    // Method name
+    ctx.fillStyle = isMethodHighlighted || isInFlow ? '#e6edf3' : '#8b949e';
+    ctx.font = `${isMethodHighlighted ? 'bold ' : ''}11px 'Cascadia Code', monospace`;
+    ctx.fillText(m.name + '(' + (m.params.length > 0 ? '...' : '') + ')', cls.x + 22, my + 8);
+
+    // Mapping count
+    const mappingCount = state.edges.filter(e => (e.from === cls.name && e.fromMethod === m.name) || (e.to === cls.name && e.toMethod === m.name)).length;
+    if (mappingCount > 0) {
+      const tx = cls.x + cls.w - 24;
+      ctx.fillStyle = '#21262d'; ctx.beginPath(); ctx.arc(tx, my + 8, 8, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = color; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'center';
+      ctx.fillText(mappingCount, tx, my + 8.5);
+    }
+  });
+
+  // SQL indicator
+  if (cls.sql.length > 0) {
+    const sy = cls.y + cls.h - 18;
+    ctx.fillStyle = '#39d2c0' + '20'; ctx.fillRect(cls.x + 4, sy, cls.w - 8, 14);
+    ctx.fillStyle = '#39d2c0'; ctx.font = '9px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText(`⚡ ${cls.sql.length} SQL quer${cls.sql.length > 1 ? 'ies' : 'y'}`, cls.x + 10, sy + 10);
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h);
+  ctx.quadraticCurveTo(x,y+h,x,y+h-r); ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+}
+
+function roundRectTop(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h); ctx.lineTo(x,y+h); ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+}
+
+function renderMinimap() {
+  mmCtx.clearRect(0,0,160,100);
+  mmCtx.fillStyle = '#0d1117'; mmCtx.fillRect(0,0,160,100);
+  if (state.classes.length === 0) return;
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  state.classes.forEach(c => { minX=Math.min(minX,c.x); minY=Math.min(minY,c.y); maxX=Math.max(maxX,c.x+c.w); maxY=Math.max(maxY,c.y+c.h); });
+  const rw = maxX-minX||1, rh = maxY-minY||1;
+  const scale = Math.min(150/rw, 90/rh);
+  const ox = (160 - rw*scale)/2, oy = (100 - rh*scale)/2;
+  state.edges.forEach(e => {
+    const a = state.classes.find(c=>c.name===e.from), b = state.classes.find(c=>c.name===e.to);
+    if (!a||!b) return;
+    mmCtx.strokeStyle = EDGE_COLORS[e.type]||'#30363d'; mmCtx.lineWidth = 0.5; mmCtx.globalAlpha = 0.4;
+    mmCtx.beginPath(); mmCtx.moveTo(ox+(a.x+a.w/2-minX)*scale, oy+(a.y+a.h/2-minY)*scale);
+    mmCtx.lineTo(ox+(b.x+b.w/2-minX)*scale, oy+(b.y+b.h/2-minY)*scale); mmCtx.stroke();
+  });
+  mmCtx.globalAlpha = 1;
+  state.classes.forEach(c => {
+    mmCtx.fillStyle = NODE_COLORS[c.type]||'#58a6ff';
+    mmCtx.fillRect(ox+(c.x-minX)*scale, oy+(c.y-minY)*scale, Math.max(3, c.w*scale), Math.max(2, c.h*scale));
+  });
+  // Viewport
+  mmCtx.strokeStyle = '#e6edf3'; mmCtx.lineWidth = 1; mmCtx.globalAlpha = 0.6;
+  const vx = ox + (-state.camera.x/state.camera.zoom - minX)*scale;
+  const vy = oy + (-state.camera.y/state.camera.zoom - minY)*scale;
+  const vw = (W/state.camera.zoom)*scale, vh = (H/state.camera.zoom)*scale;
+  mmCtx.strokeRect(vx, vy, vw, vh);
+  mmCtx.globalAlpha = 1;
+}
+
+// ==================== INTERACTION ====================
+function screenToWorld(sx, sy) {
+  return { x: (sx - state.camera.x) / state.camera.zoom, y: (sy - state.camera.y) / state.camera.zoom };
+}
+
+function hitTest(wx, wy) {
+  for (let i = state.classes.length - 1; i >= 0; i--) {
+    const c = state.classes[i];
+    if (wx >= c.x && wx <= c.x + c.w && wy >= c.y && wy <= c.y + c.h) {
+      // Check which method
+      let method = null;
+      c.methods.forEach((m, mi) => {
+        const my = c.y + 38 + mi * 20;
+        if (wy >= my && wy < my + 20) method = m.name;
+      });
+      return { node: c, method };
+    }
+  }
+  return null;
+}
+
+canvas.addEventListener('mousedown', e => {
+  const { x, y } = screenToWorld(e.offsetX, e.offsetY);
+  const hit = hitTest(x, y);
+  if (hit) {
+    state.drag = { node: hit.node, startX: x - hit.node.x, startY: y - hit.node.y };
+    if (e.detail === 1) {
+      selectNode(hit.node, hit.method);
+    }
+  } else {
+    state.pan = { startX: e.offsetX - state.camera.x, startY: e.offsetY - state.camera.y };
+    clearSelection();
+  }
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (state.drag) {
+    const { x, y } = screenToWorld(e.offsetX, e.offsetY);
+    state.drag.node.x = x - state.drag.startX;
+    state.drag.node.y = y - state.drag.startY;
+    state.needsRender = true;
+  } else if (state.pan) {
+    state.camera.x = e.offsetX - state.pan.startX;
+    state.camera.y = e.offsetY - state.pan.startY;
+    state.needsRender = true;
+  } else {
+    const { x, y } = screenToWorld(e.offsetX, e.offsetY);
+    const hit = hitTest(x, y);
+    canvas.style.cursor = hit ? (hit.method ? 'pointer' : 'grab') : 'default';
+  }
+});
+
+canvas.addEventListener('mouseup', () => { state.drag = null; state.pan = null; });
+canvas.addEventListener('mouseleave', () => { state.drag = null; state.pan = null; });
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  const wx = (e.offsetX - state.camera.x) / state.camera.zoom;
+  const wy = (e.offsetY - state.camera.y) / state.camera.zoom;
+  state.camera.zoom = Math.max(0.1, Math.min(4, state.camera.zoom * delta));
+  state.camera.x = e.offsetX - wx * state.camera.zoom;
+  state.camera.y = e.offsetY - wy * state.camera.zoom;
+  state.needsRender = true;
+}, { passive: false });
+
+function selectNode(node, method) {
+  state.selectedNode = node;
+  state.selectedMethod = method || null;
+  state.highlightedEdges.clear();
+  state.highlightedNodes.clear();
+  state.highlightedNodes.add(node.name);
+
+  // Find all connected edges
+  state.edges.forEach(e => {
+    const match = method
+      ? ((e.from === node.name && e.fromMethod === method) || (e.to === node.name && e.toMethod === method) || (e.from === node.name && !e.fromMethod) || (e.to === node.name && !e.toMethod))
+      : (e.from === node.name || e.to === node.name);
+    if (match) {
+      state.highlightedEdges.add(e);
+      state.highlightedNodes.add(e.from);
+      state.highlightedNodes.add(e.to);
+    }
+  });
+
+  updateSidebar();
+  updateFlowPanel();
+  generateTests();
+  generateAnalysis();
+  state.needsRender = true;
+}
+
+function clearSelection() {
+  state.selectedNode = null; state.selectedMethod = null;
+  state.highlightedEdges.clear(); state.highlightedNodes.clear();
+  updateSidebar();
+  state.needsRender = true;
+}
+
+// ==================== SIDEBAR ====================
+function updateSidebar() {
+  const tree = document.getElementById('classTree');
+  tree.innerHTML = '';
+  state.classes.forEach(cls => {
+    const isSelected = state.selectedNode === cls;
+    const div = document.createElement('div');
+    div.className = 'class-node-item' + (isSelected ? ' selected' : '');
+    const iconClass = cls.type === 'interface' ? 'icon-interface' : cls.type === 'enum' ? 'icon-enum' : cls.type === 'sql' ? 'icon-sql' : cls.type === 'service' || cls.type === 'impl' ? 'icon-service' : 'icon-class';
+    const badge = cls.type.charAt(0).toUpperCase();
+    const mappingCount = state.edges.filter(e => e.from === cls.name || e.to === cls.name).length;
+    div.innerHTML = `<span class="icon ${iconClass}">${badge}</span>${cls.name}<span class="mapping-count">${mappingCount}</span>`;
+    div.onclick = () => { selectNode(cls, null); zoomToNode(cls); };
+    tree.appendChild(div);
+
+    if (isSelected) {
+      cls.methods.forEach(m => {
+        const md = document.createElement('div');
+        md.className = 'method-item' + (state.selectedMethod === m.name ? ' highlighted' : '');
+        md.textContent = '▸ ' + m.name + '()';
+        md.onclick = (e) => { e.stopPropagation(); selectNode(cls, m.name); };
+        tree.appendChild(md);
+      });
+    }
+  });
+}
+
+// ==================== FLOW PANEL ====================
+function updateFlowPanel() {
+  const el = document.getElementById('flowDetails');
+  if (!state.selectedNode) {
+    el.innerHTML = '<div class="empty-state"><div class="big-icon">⇄</div><p>Click a node or method to see data flow</p></div>';
+    return;
+  }
+  const node = state.selectedNode;
+  const edges = [...state.highlightedEdges];
+  let html = `<div style="margin-bottom:12px;"><b style="color:${NODE_COLORS[node.type]}">${node.name}</b>`;
+  if (state.selectedMethod) html += ` → <b style="color:var(--pink)">${state.selectedMethod}()</b>`;
+  html += `<br><span style="font-size:11px;color:var(--text2)">${node.type} | ${node.language} | ${node.methods.length} methods</span></div>`;
+
+  if (edges.length === 0) {
+    html += '<p style="color:var(--text2)">No mappings found for this selection.</p>';
+  } else {
+    const outgoing = edges.filter(e => e.from === node.name);
+    const incoming = edges.filter(e => e.to === node.name);
+
+    if (outgoing.length > 0) {
+      html += '<div style="margin-bottom:10px;"><b style="color:var(--accent);font-size:11px;">OUTGOING FLOWS (' + outgoing.length + ')</b></div>';
+      outgoing.forEach(e => {
+        html += `<div style="padding:6px 8px;background:var(--surface2);border-radius:6px;margin-bottom:4px;border-left:3px solid ${EDGE_COLORS[e.type]}">`;
+        html += `<span class="from">${e.from}</span>${e.fromMethod ? '.<b>'+e.fromMethod+'()</b>' : ''} <span class="arrow">→</span> <span class="to">${e.to}</span>${e.toMethod ? '.<b>'+e.toMethod+'()</b>' : ''}`;
+        html += `<br><span style="font-size:10px;color:${EDGE_COLORS[e.type]}">${e.type} | ${e.label || ''}</span></div>`;
+      });
+    }
+    if (incoming.length > 0) {
+      html += '<div style="margin:10px 0;"><b style="color:var(--green);font-size:11px;">INCOMING FLOWS (' + incoming.length + ')</b></div>';
+      incoming.forEach(e => {
+        html += `<div style="padding:6px 8px;background:var(--surface2);border-radius:6px;margin-bottom:4px;border-left:3px solid ${EDGE_COLORS[e.type]}">`;
+        html += `<span class="from">${e.from}</span>${e.fromMethod ? '.<b>'+e.fromMethod+'()</b>' : ''} <span class="arrow">→</span> <span class="to">${e.to}</span>${e.toMethod ? '.<b>'+e.toMethod+'()</b>' : ''}`;
+        html += `<br><span style="font-size:10px;color:${EDGE_COLORS[e.type]}">${e.type} | ${e.label || ''}</span></div>`;
+      });
+    }
+  }
+
+  // SQL flows
+  if (node.sql.length > 0) {
+    html += '<div style="margin:10px 0;"><b style="color:var(--cyan);font-size:11px;">SQL QUERIES (' + node.sql.length + ')</b></div>';
+    node.sql.forEach((s, i) => {
+      const tables = extractTables(s);
+      html += `<div style="padding:6px 8px;background:var(--surface2);border-radius:6px;margin-bottom:4px;border-left:3px solid var(--cyan)">`;
+      html += `<span style="color:var(--cyan);font-size:10px;font-weight:700">QUERY ${i+1}</span>`;
+      html += `<br><code style="font-size:10px;color:var(--text2)">${s.substring(0,120)}${s.length>120?'...':''}</code>`;
+      if (tables.length > 0) html += `<br><span style="font-size:10px;color:var(--orange)">Tables: ${tables.join(', ')}</span>`;
+      html += '</div>';
+    });
+  }
+  el.innerHTML = html;
+}
+
+// ==================== TEST GENERATOR ====================
+function generateTests() {
+  const el = document.getElementById('testCases');
+  if (!state.selectedNode) { el.innerHTML = '<div class="empty-state"><div class="big-icon">☑</div><p>Select a class or method to generate tests</p></div>'; return; }
+  const node = state.selectedNode;
+  const methods = state.selectedMethod ? node.methods.filter(m => m.name === state.selectedMethod) : node.methods;
+  if (methods.length === 0) { el.innerHTML = '<p style="color:var(--text2)">No methods to test.</p>'; return; }
+  let html = '';
+  const testTypes = [
+    { type: 'unit', css: 'unit', templates: ['should return expected result', 'should handle null input', 'should handle empty input', 'should process valid data correctly'] },
+    { type: 'integration', css: 'integration', templates: ['should integrate with {dep}', 'should handle {dep} failure gracefully', 'should maintain data consistency across {dep}'] },
+    { type: 'edge case', css: 'edge', templates: ['should handle maximum input size', 'should handle concurrent access', 'should handle special characters', 'should handle unicode input'] },
+    { type: 'negative', css: 'negative', templates: ['should throw on invalid input', 'should return error for unauthorized access', 'should handle timeout correctly', 'should reject malformed data'] },
+    { type: 'boundary', css: 'boundary', templates: ['should handle zero value', 'should handle Integer.MAX boundary', 'should handle empty collection', 'should handle single element'] },
+    { type: 'performance', css: 'perf', templates: ['should complete within SLA under load', 'should handle batch processing efficiently', 'should not leak memory on repeated calls'] }
+  ];
+
+  methods.forEach(m => {
+    html += `<div style="margin-bottom:12px;"><b style="color:var(--text);font-size:13px;">${m.name}()</b><span style="color:var(--text2);font-size:11px;margin-left:6px">${m.params.length} params</span></div>`;
+    const deps = state.edges.filter(e => e.from === node.name).map(e => e.to);
+    testTypes.forEach(tt => {
+      tt.templates.forEach((tmpl, ti) => {
+        const name = tmpl.replace('{dep}', deps[ti % deps.length] || 'dependency');
+        html += `<div class="test-card"><span class="type ${tt.css}">${tt.type}</span><div class="name">test_${m.name}_${tt.type.replace(' ','_')}_${ti+1}</div><div class="detail">${m.name}() ${name}</div></div>`;
+      });
+    });
+
+    // SQL-specific tests
+    if (node.sql.length > 0) {
+      html += `<div class="test-card"><span class="type" style="background:rgba(57,210,192,.15);color:var(--cyan)">sql</span><div class="name">test_${m.name}_sql_injection_prevention</div><div class="detail">Verify SQL injection prevention for parameterized queries</div></div>`;
+      html += `<div class="test-card"><span class="type" style="background:rgba(57,210,192,.15);color:var(--cyan)">sql</span><div class="name">test_${m.name}_query_performance</div><div class="detail">Verify query execution within acceptable time limits</div></div>`;
+      html += `<div class="test-card"><span class="type" style="background:rgba(57,210,192,.15);color:var(--cyan)">sql</span><div class="name">test_${m.name}_transaction_rollback</div><div class="detail">Verify transaction rollback on partial failure</div></div>`;
+    }
+  });
+
+  const totalTests = (el.innerHTML = html, el.querySelectorAll('.test-card').length);
+  html = `<div style="background:var(--surface2);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;"><b style="color:var(--green)">${totalTests} test cases</b> generated covering unit, integration, edge, negative, boundary & performance scenarios</div>` + html;
+  el.innerHTML = html;
+}
+
+// ==================== AI ANALYSIS ====================
+function generateAnalysis() {
+  const el = document.getElementById('aiSuggestions');
+  if (!state.selectedNode) { el.innerHTML = '<div class="empty-state"><div class="big-icon">⚙</div><p>Select a class or method for AI analysis</p></div>'; return; }
+  const node = state.selectedNode;
+  let html = '';
+  let sugNum = 1;
+
+  // Dependency analysis
+  const deps = state.edges.filter(e => e.from === node.name);
+  const depBy = state.edges.filter(e => e.to === node.name);
+  if (deps.length > 5) {
+    html += suggestion(sugNum++, 'High Coupling Detected', `${node.name} has ${deps.length} outgoing dependencies. This violates the Single Responsibility Principle and makes the class harder to test and maintain.`,
+      `class ${node.name} {\n  // ${deps.length} dependencies injected\n  private ${deps.map(d=>d.to).join(', ')};\n}`,
+      `// Split into focused classes:\nclass ${node.name}Core { /* core logic */ }\nclass ${node.name}Orchestrator { /* coordination */ }\n// Each with ≤3 dependencies`);
+  }
+
+  // Method count
+  if (node.methods.length > 7) {
+    html += suggestion(sugNum++, 'God Class Anti-Pattern', `${node.name} has ${node.methods.length} methods. Consider extracting cohesive groups into separate classes.`,
+      `class ${node.name} {\n  // ${node.methods.length} methods in one class\n  ${node.methods.map(m=>m.name+'()').join(', ')}\n}`,
+      `// Group related methods:\nclass ${node.name}Reader { /* read operations */ }\nclass ${node.name}Writer { /* write operations */ }\nclass ${node.name}Validator { /* validation */ }`);
+  }
+
+  // Interface segregation
+  if (node.implements && node.implements.length > 2) {
+    html += suggestion(sugNum++, 'Interface Segregation', `Implementing ${node.implements.length} interfaces may violate ISP.`,
+      `class ${node.name} implements ${node.implements.join(', ')} { }`,
+      `// Consider splitting:\nclass ${node.name}Core implements ${node.implements[0]} { }\nclass ${node.name}Extended implements ${node.implements.slice(1).join(', ')} { }`);
+  }
+
+  // SQL security
+  if (node.sql.length > 0) {
+    html += suggestion(sugNum++, 'SQL Security Review', `Found ${node.sql.length} SQL queries. Ensure parameterized queries to prevent SQL injection.`,
+      `String query = "SELECT * FROM users WHERE id = " + userId;`,
+      `PreparedStatement ps = conn.prepareStatement(\n  "SELECT * FROM users WHERE id = ?"\n);\nps.setString(1, userId);`);
+  }
+
+  // Naming conventions
+  node.methods.forEach(m => {
+    if (m.name.length < 3 || m.name.length > 40) {
+      html += suggestion(sugNum++, 'Method Naming', `Method "${m.name}" name length is ${m.name.length < 3 ? 'too short' : 'too long'}.`,
+        m.name + '()', m.name.length < 3 ? 'processUserData()  // descriptive name' : m.name.substring(0,20) + '()  // shortened');
+    }
+  });
+
+  // Data flow complexity
+  if (state.selectedMethod) {
+    const methodEdges = state.edges.filter(e => (e.from === node.name && e.fromMethod === state.selectedMethod) || (e.to === node.name && e.toMethod === state.selectedMethod));
+    if (methodEdges.length > 3) {
+      html += suggestion(sugNum++, 'Complex Data Flow', `${state.selectedMethod}() has ${methodEdges.length} data flow connections. Consider introducing a mediator or facade.`,
+        `${state.selectedMethod}() {\n  ${methodEdges.map(e => e.to + '.' + (e.toMethod||'process') + '()').join(';\n  ')};\n}`,
+        `${state.selectedMethod}() {\n  orchestrator.execute(context);\n  // Mediator handles coordination\n}`);
+    }
+  }
+
+  // Missing patterns
+  if (node.type === 'service' && !state.classes.some(c => c.name === node.name + 'Impl')) {
+    html += suggestion(sugNum++, 'Missing Implementation Pattern', `Service "${node.name}" has no separate Impl class. Using interface + impl pattern improves testability.`,
+      `class ${node.name} { /* direct implementation */ }`,
+      `interface I${node.name} { /* contract */ }\nclass ${node.name}Impl implements I${node.name} { /* impl */ }`);
+  }
+
+  // Circular dependency check
+  const visited = new Set();
+  function hasCycle(name, path) {
+    if (path.includes(name)) return true;
+    if (visited.has(name)) return false;
+    visited.add(name);
+    return state.edges.filter(e => e.from === name).some(e => hasCycle(e.to, [...path, name]));
+  }
+  if (hasCycle(node.name, [])) {
+    html += suggestion(sugNum++, 'Circular Dependency', `Circular dependency detected involving ${node.name}. This creates tight coupling and initialization issues.`,
+      `A → B → C → A  // circular`,
+      `A → B → C  // break cycle with events or interfaces\nA ← EventBus ← C`);
+  }
+
+  // General best practices
+  html += suggestion(sugNum++, 'Error Handling', `Review error handling in ${node.name} for consistent exception management.`,
+    `try { ... } catch (Exception e) {\n  e.printStackTrace();\n}`,
+    `try { ... } catch (SpecificException e) {\n  log.error("Context: {}", context, e);\n  throw new ServiceException("msg", e);\n}`);
+
+  if (html === '') html = '<p style="color:var(--text2)">No significant issues detected. Code looks clean!</p>';
+  el.innerHTML = html;
+}
+
+function suggestion(num, title, desc, original, suggest) {
+  return `<div class="suggestion-card"><div class="label">Suggestion ${num}: ${title}</div><div class="desc">${desc}</div><div style="font-size:10px;color:var(--red);margin-bottom:3px;font-weight:600">ORIGINAL:</div><div class="original">${original}</div><div style="font-size:10px;color:var(--green);margin-bottom:3px;font-weight:600;margin-top:6px">SUGGESTED:</div><div class="suggest">${suggest}</div></div>`;
+}
+
+// ==================== ZOOM ====================
+function zoomToNode(node) {
+  state.camera.zoom = 1.2;
+  state.camera.x = W/2 - (node.x + node.w/2) * state.camera.zoom;
+  state.camera.y = H/2 - (node.y + node.h/2) * state.camera.zoom;
+  state.needsRender = true;
+}
+
+function zoomToFit() {
+  if (state.classes.length === 0) return;
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  state.classes.forEach(c => { minX=Math.min(minX,c.x); minY=Math.min(minY,c.y); maxX=Math.max(maxX,c.x+c.w); maxY=Math.max(maxY,c.y+c.h); });
+  const pad = 60;
+  const rw = maxX-minX+pad*2, rh = maxY-minY+pad*2;
+  state.camera.zoom = Math.min(W/rw, H/rh, 2);
+  state.camera.x = (W - rw*state.camera.zoom)/2 - (minX-pad)*state.camera.zoom;
+  state.camera.y = (H - rh*state.camera.zoom)/2 - (minY-pad)*state.camera.zoom;
+  state.needsRender = true;
+}
+
+document.getElementById('zoomIn').onclick = () => { state.camera.zoom = Math.min(4, state.camera.zoom * 1.2); state.needsRender = true; };
+document.getElementById('zoomOut').onclick = () => { state.camera.zoom = Math.max(0.1, state.camera.zoom * 0.8); state.needsRender = true; };
+document.getElementById('zoomFit').onclick = zoomToFit;
+
+// ==================== TABS ====================
+document.querySelectorAll('.tab-bar button').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.remove('hidden');
+  };
+});
+
+// ==================== VIEW MODES ====================
+document.getElementById('flowBtn').onclick = () => setView('flow');
+document.getElementById('depBtn').onclick = () => setView('deps');
+document.getElementById('sqlBtn').onclick = () => setView('sql');
+function setView(mode) {
+  state.viewMode = mode;
+  document.querySelectorAll('#flowBtn,#depBtn,#sqlBtn').forEach(b => b.classList.remove('active'));
+  document.getElementById(mode === 'flow' ? 'flowBtn' : mode === 'deps' ? 'depBtn' : 'sqlBtn').classList.add('active');
+  state.needsRender = true;
+}
+
+// ==================== SEARCH ====================
+document.getElementById('searchBox').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase();
+  if (!q) { clearSelection(); return; }
+  const found = state.classes.find(c => c.name.toLowerCase().includes(q) || c.methods.some(m => m.name.toLowerCase().includes(q)));
+  if (found) { selectNode(found, null); zoomToNode(found); }
+});
+
+// ==================== FILE LOADING ====================
+document.getElementById('fileInput').addEventListener('change', async e => {
+  const files = e.target.files;
+  for (const file of files) {
+    const text = await file.text();
+    loadCode(text, file.name);
+  }
+  finishLoad();
+});
+
+// ==================== PASTE ====================
+document.getElementById('pasteBtn').onclick = () => {
+  document.getElementById('pasteModal').style.display = 'flex';
+};
+window.closePasteModal = () => { document.getElementById('pasteModal').style.display = 'none'; };
+window.parseFromTextarea = () => {
+  const text = document.getElementById('codeTextarea').value;
+  // Split by file markers
+  const parts = text.split(/\/\/\s*---\s*FILE:\s*/i);
+  if (parts.length > 1) {
+    parts.slice(1).forEach(part => {
+      const nl = part.indexOf('\n');
+      const filename = part.substring(0, nl).replace(/---/g, '').trim();
+      const code = part.substring(nl + 1);
+      loadCode(code, filename);
+    });
+  } else {
+    loadCode(text, 'code.java');
+  }
+  finishLoad();
+  closePasteModal();
+};
+
+function loadCode(text, filename) {
+  const { classes, edges, sqls } = parseCode(text, filename);
+  state.classes.push(...classes);
+  state.edges.push(...edges);
+  state.sqlNodes.push(...sqls);
+}
+
+function finishLoad() {
+  // Deduplicate edges
+  const seen = new Set();
+  state.edges = state.edges.filter(e => {
+    const key = `${e.from}-${e.to}-${e.fromMethod||''}-${e.toMethod||''}-${e.type}`;
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+
+  layoutNodes();
+  updateStats();
+  updateSidebar();
+  zoomToFit();
+  state.needsRender = true;
+}
+
+function updateStats() {
+  document.getElementById('statClasses').textContent = state.classes.length;
+  document.getElementById('statMethods').textContent = state.classes.reduce((s, c) => s + c.methods.length, 0);
+  document.getElementById('statFlows').textContent = state.edges.length;
+  document.getElementById('statSql').textContent = state.sqlNodes.length;
+}
+
+// ==================== POP-OUT ====================
+document.getElementById('popoutBtn').onclick = () => {
+  const w = window.open('', 'CodeVisual', `width=${screen.width*0.8},height=${screen.height*0.8},left=100,top=100`);
+  w.document.write(document.documentElement.outerHTML);
+  w.document.close();
+};
+
+// ==================== SAMPLE DATA ====================
+document.getElementById('sampleBtn').onclick = () => {
+  const sample = `// --- FILE: UserController.java ---
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    @Autowired
+    private UserService userService;
+    @Autowired
+    private AuthService authService;
+
+    @GetMapping("/{id}")
+    public ResponseEntity<UserDTO> getUser(@PathVariable Long id) {
+        return ResponseEntity.ok(userService.findById(id));
+    }
+
+    @PostMapping
+    public ResponseEntity<UserDTO> createUser(@RequestBody CreateUserRequest request) {
+        authService.validateToken(request.getToken());
+        return ResponseEntity.ok(userService.createUser(request));
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<UserDTO> updateUser(@PathVariable Long id, @RequestBody UpdateUserRequest request) {
+        return ResponseEntity.ok(userService.updateUser(id, request));
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteUser(@PathVariable Long id) {
+        userService.deleteUser(id);
+        return ResponseEntity.ok().build();
+    }
+}
+
+// --- FILE: UserService.java ---
+public interface UserService {
+    UserDTO findById(Long id);
+    UserDTO createUser(CreateUserRequest request);
+    UserDTO updateUser(Long id, UpdateUserRequest request);
+    void deleteUser(Long id);
+    List<UserDTO> findAll();
+    UserDTO findByEmail(String email);
+}
+
+// --- FILE: UserServiceImpl.java ---
+@Service
+public class UserServiceImpl implements UserService {
+    @Autowired
+    private UserRepository userRepository;
+    @Autowired
+    private UserMapper userMapper;
+    @Autowired
+    private NotificationService notificationService;
+    @Autowired
+    private CacheService cacheService;
+
+    @Override
+    public UserDTO findById(Long id) {
+        UserDTO cached = cacheService.get("user:" + id);
+        if (cached != null) return cached;
+        User user = userRepository.findById(id);
+        UserDTO dto = userMapper.toDTO(user);
+        cacheService.put("user:" + id, dto);
+        return dto;
+    }
+
+    @Override
+    public UserDTO createUser(CreateUserRequest request) {
+        User user = userMapper.toEntity(request);
+        user = userRepository.save(user);
+        notificationService.sendWelcomeEmail(user);
+        return userMapper.toDTO(user);
+    }
+
+    @Override
+    public UserDTO updateUser(Long id, UpdateUserRequest request) {
+        User user = userRepository.findById(id);
+        userMapper.updateEntity(user, request);
+        user = userRepository.save(user);
+        cacheService.invalidate("user:" + id);
+        return userMapper.toDTO(user);
+    }
+
+    @Override
+    public void deleteUser(Long id) {
+        userRepository.deleteById(id);
+        cacheService.invalidate("user:" + id);
+    }
+
+    @Override
+    public List<UserDTO> findAll() {
+        return userRepository.findAll().stream().map(userMapper::toDTO).collect(Collectors.toList());
+    }
+
+    @Override
+    public UserDTO findByEmail(String email) {
+        User user = userRepository.findByEmail(email);
+        return userMapper.toDTO(user);
+    }
+}
+
+// --- FILE: UserRepository.java ---
+@Repository
+public interface UserRepository extends JpaRepository<User, Long> {
+    @Query("SELECT u FROM User u WHERE u.email = :email")
+    User findByEmail(@Param("email") String email);
+
+    @Query("SELECT u FROM User u WHERE u.status = :status ORDER BY u.createdAt DESC")
+    List<User> findByStatus(@Param("status") String status);
+
+    @Query("SELECT u FROM User u JOIN u.roles r WHERE r.name = :roleName")
+    List<User> findByRole(@Param("roleName") String roleName);
+
+    User findById(Long id);
+    User save(User user);
+    void deleteById(Long id);
+    List<User> findAll();
+}
+
+// --- FILE: AuthService.java ---
+@Service
+public class AuthService {
+    @Autowired
+    private TokenRepository tokenRepository;
+    @Autowired
+    private UserRepository userRepository;
+
+    public boolean validateToken(String token) {
+        return tokenRepository.isValid(token);
+    }
+
+    public AuthToken generateToken(User user) {
+        AuthToken token = new AuthToken(user);
+        tokenRepository.save(token);
+        return token;
+    }
+
+    public User authenticate(String username, String password) {
+        User user = userRepository.findByEmail(username);
+        return user;
+    }
+}
+
+// --- FILE: NotificationService.java ---
+@Service
+public class NotificationService {
+    @Autowired
+    private EmailClient emailClient;
+    @Autowired
+    private TemplateEngine templateEngine;
+
+    public void sendWelcomeEmail(User user) {
+        String body = templateEngine.render("welcome", user);
+        emailClient.send(user.getEmail(), "Welcome!", body);
+    }
+
+    public void sendPasswordReset(User user, String token) {
+        String body = templateEngine.render("reset", user);
+        emailClient.send(user.getEmail(), "Reset Password", body);
+    }
+}
+
+// --- FILE: UserMapper.java ---
+@Component
+public class UserMapper {
+    public UserDTO toDTO(User user) {
+        return new UserDTO(user.getId(), user.getName(), user.getEmail());
+    }
+
+    public User toEntity(CreateUserRequest request) {
+        return new User(request.getName(), request.getEmail());
+    }
+
+    public void updateEntity(User user, UpdateUserRequest request) {
+        user.setName(request.getName());
+        user.setEmail(request.getEmail());
+    }
+}
+
+// --- FILE: CacheService.java ---
+@Service
+public class CacheService {
+    private Map<String, Object> cache = new ConcurrentHashMap<>();
+
+    public UserDTO get(String key) {
+        return (UserDTO) cache.get(key);
+    }
+
+    public void put(String key, Object value) {
+        cache.put(key, value);
+    }
+
+    public void invalidate(String key) {
+        cache.remove(key);
+    }
+
+    public void clearAll() {
+        cache.clear();
+    }
+}
+
+// --- FILE: User.java ---
+@Entity
+@Table(name = "users")
+public class User {
+    @Id
+    @GeneratedValue
+    private Long id;
+    private String name;
+    private String email;
+    private String status;
+    private LocalDateTime createdAt;
+
+    public Long getId() { return id; }
+    public String getName() { return name; }
+    public String getEmail() { return email; }
+    public void setName(String name) { this.name = name; }
+    public void setEmail(String email) { this.email = email; }
+}
+
+// --- FILE: UserDTO.java ---
+public class UserDTO {
+    private Long id;
+    private String name;
+    private String email;
+
+    public Long getId() { return id; }
+    public String getName() { return name; }
+    public String getEmail() { return email; }
+}
+
+// --- FILE: queries.sql ---
+SELECT u.id, u.name, u.email FROM users u WHERE u.status = 'ACTIVE';
+INSERT INTO users (name, email, status, created_at) VALUES (?, ?, 'ACTIVE', NOW());
+UPDATE users SET name = ?, email = ? WHERE id = ?;
+DELETE FROM users WHERE id = ? AND status = 'INACTIVE';
+SELECT u.id, u.name, r.role_name FROM users u JOIN user_roles ur ON u.id = ur.user_id JOIN roles r ON ur.role_id = r.id WHERE r.role_name = 'ADMIN';
+CREATE TABLE audit_log (id BIGINT AUTO_INCREMENT, user_id BIGINT, action VARCHAR(50), timestamp DATETIME, FOREIGN KEY (user_id) REFERENCES users(id));
+`;
+  document.getElementById('codeTextarea').value = sample;
+  parseFromTextarea();
+};
+
+// ==================== INIT ====================
+resize();
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
